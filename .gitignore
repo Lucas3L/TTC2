@@ -1,0 +1,17 @@
+# Dados (não versionar)
+Dados/raw/
+Dados/processed/
+Dados/preprocessed/
+
+# Resultados gerados
+results/
+
+# Python
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Ambiente
+.env
