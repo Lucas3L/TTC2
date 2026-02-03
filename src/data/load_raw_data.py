@@ -1,80 +1,99 @@
 from pathlib import Path
 import pandas as pd
 
-# Filtragem apartir da pasta seguinte
+# Caminho de entrada (dados brutos)
 BASE_PATH = Path("Dados/raw")
 
-# Pasta onde serão salvos os novos dados
+# Caminho de saída (dados processados)
 OUTPUT_BASE = Path("Dados/processed")
 
-# Enquanto existir intens dentro da Base_path percorra 1 por 1
+# Percorre todos os mercados
 for market_path in BASE_PATH.iterdir():
 
-    # Se o item não for uma pasta, ignore
+    # Verifica somente pastas
     if not market_path.is_dir():
         continue
-
-    # extração do nome da pasta para depois imprimir 
+    
+    # Retorna o nome do Mercado apos atribuir
     market_name = market_path.name
     print(f"Processando {market_name}")
 
-    # Caminho até a pasta de saidado onde serao tratados os dados 
+    # Envia a rota até a pasta de destino
     market_output = OUTPUT_BASE / market_name
-
-    # Criação das pastas caso não existam
     market_output.mkdir(parents=True, exist_ok=True)
 
-    # para cada mercado percorrer o que tem dentro
+    # Percorre categorias do mercado
     for category_path in market_path.iterdir():
 
-        # Caso o item não seja uma pasta ignore
+        # Verifica se tem pastas
         if not category_path.is_dir():
             continue
 
-        # retorna o nome da pasta, divide o nome em String, pega apenas o elemento 0 da lista   
+        # Identifica a categoria 
         category_code = category_path.name.split("-")[0]
-
-        #mostra a categoria divida por espaço
         print(f"  Categoria {category_code}")
 
-        #criação de uma lista para arrays de dados
+        # Salva os dados em um array
         dados_categoria = []
 
-        # Estrutura para perccorrer todos os arquivos com padrão .csv
+        # Percorre arquivos CSV da categoria
         for csv_file in category_path.glob("*.csv"):
 
-            #Busca o arquivo e salva o nome dele sem a extensão
+            # Atribui um id ao produto
             product_id = csv_file.stem.split("_")[0]
 
-            # Lê o arquivo e retorna uma tabela de memoria,
-            # Parametros de localização e conversão da coluna em data em datetime
+            # Le e converte a colona data 
             df = pd.read_csv(csv_file, parse_dates=["Date"])
 
-            # coluna de produto
+            # Garante Date válida
+            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+            df = df.dropna(subset=["Date"])
+
+            # Se a coluna ProductCost não existir, cria com NaN
+            if "ProductCost" not in df.columns:
+                df["ProductCost"] = pd.NA
+
+
+            # Metadados
             df["product_id"] = product_id
-
-            # coluna de categoria
             df["category"] = category_code
-
-            # coluna de mercado
             df["market"] = market_name
 
-            # armazena dados representada pela categoria
             dados_categoria.append(df)
 
-        # Se existem dados na categoria
+        # Se houver dados na categoria
         if dados_categoria:
-            # Junte todos esses dados em uma unica tabela com os dados corretamente no tempo
             df_categoria = pd.concat(dados_categoria, ignore_index=True)
+
             df_categoria = df_categoria.sort_values(
                 ["product_id", "Date"]
             )
-            # Define o arquivo de saida e salvo tudo no formato .csv
-            output_file = market_output / f"cat{category_code}.csv"
 
-            # Salvamento do arquivo csv
+            # Validação estrutural
+            colunas_esperadas = {
+                "Date",
+                "Quantity",
+                "UnitValue",
+                "ProductCost",
+                "product_id",
+                "category",
+                "market"
+            }
+
+            # Salva as colunas faltantes
+            faltando = colunas_esperadas - set(df_categoria.columns)
+
+            # Verifica se há dados faltantes
+            if faltando:
+                raise ValueError(
+                    f"Colunas ausentes na categoria {category_code}: {faltando}"
+                )
+
+            # Envia os dados para a pasta de saida
+            output_file = market_output / f"cat{category_code}.csv"
             df_categoria.to_csv(output_file, index=False)
 
-            print(f"    Arquivo salvo: {output_file}")
+            print(f"    ✔ Arquivo salvo: {output_file}")
+
         else:
             print(f"    ⚠️ Categoria {category_code} sem produtos")
