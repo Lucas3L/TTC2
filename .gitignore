@@ -1,10 +1,10 @@
 # Dados (não versionar)
-Dados/raw/
-Dados/processed/
-Dados/preprocessed/
+Dados/
 
 # Resultados gerados
 results/
+Resultados/
+*.csv
 
 # Python
 __pycache__/
