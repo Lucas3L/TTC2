@@ -1,0 +1,8 @@
+{
+  "python.analysis.extraPaths": [
+    "./.venv/Lib/site-packages"
+  ],
+  "python.analysis.indexing": true,
+  "python.analysis.useLibraryCodeForTypes": true,
+  "python.analysis.autoSearchPaths": true
+}
