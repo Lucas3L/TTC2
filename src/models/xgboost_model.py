@@ -10,7 +10,7 @@ if str(root) not in sys.path:
     sys.path.append(str(root))
 
 try:
-    from src.models.evaluate import evaluate
+    from .evaluate import evaluate
 except ImportError:
     from evaluate import evaluate
 
