@@ -1,6 +1,13 @@
 import numpy as np
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
+def mae(y_true, y_pred):
+    # Retorna a média das diferenças absolutas
+    return np.mean(np.abs(y_true - y_pred))
+
+def rmse(y_true, y_pred):
+    # Retorna a raiz do erro quadrático médio
+    return np.sqrt(np.mean((y_true - y_pred) ** 2))
 
 def smape(y_true, y_pred):
     # Converte entradas para arrays e garante formato unidimensional para o cálculo
