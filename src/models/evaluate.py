@@ -27,7 +27,7 @@ def smape(y_true, y_pred):
     return np.mean(diff) * 100
 
 
-def evaluate_model(y_true, y_pred):
+def evaluate(y_true, y_pred):
     # Padronização de formato para garantir compatibilidade com saídas do GRU/LSTM/XGBoost
     y_true = np.asarray(y_true).reshape(-1)
     y_pred = np.asarray(y_pred).reshape(-1)

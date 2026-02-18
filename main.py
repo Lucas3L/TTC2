@@ -1,10 +1,14 @@
+import os
+import random
+import numpy as np
+import tensorflow as tf
 import subprocess
 import time
 import csv
 import re
 from pathlib import Path
 from datetime import datetime
-
+import argparse
 
 # Semente base para garantir que os experimentos sejam replicáveis
 RANDOM_SEED = 42
@@ -12,7 +16,7 @@ RANDOM_SEED = 42
 N_REPLICAS = 3
 
 # Gestão de caminhos robusta utilizando Pathlib para evitar erros de diretório
-BASE_DIR = Path(__file__).resolve().parents[1]
+BASE_DIR = Path(__file__).resolve().parent
 SRC_DIR = BASE_DIR / "src"
 
 # Define e garante a existência da pasta de resultados
@@ -28,6 +32,16 @@ MODELS = {
     "XGBoost": SRC_DIR / "models" / "xgboost_model.py"
 }
 
+def set_global_seed(seed: int = 42):
+    """
+    Garante reprodutibilidade total do pipeline travando as sementes
+    do Python, Numpy e TensorFlow de forma global.
+    """
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    os.environ["TF_DETERMINISTIC_OPS"] = "1" # Força algoritmos determinísticos no TF
+    random.seed(seed)
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
 
 def extract_smape(output: str):
     """
@@ -111,6 +125,13 @@ def log_result(model_name, replica_id, seed, smape, runtime, status):
 
 def main():
     print("\n================ INICIANDO EXPERIMENTOS =================\n")
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+    
+    # Use a função que criamos antes para travar tudo
+    set_global_seed(args.seed)
 
     init_csv()
 

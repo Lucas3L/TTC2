@@ -1,70 +1,55 @@
 import pandas as pd
+from pathlib import Path
+import sys
+import numpy as np
+
+
+file_path = Path(__file__).resolve()
+root = file_path.parents[2]
+if str(root) not in sys.path:
+    sys.path.append(str(root))
+
+from src.features.feature_engineering import build_features
+
+BASE_DIR = Path("Dados")
+INPUT_DIR = BASE_DIR / "split"
+OUTPUT_DIR = BASE_DIR / "features"
+
+OUTPUT_DIR.mkdir(exist_ok=True)
 
 # Conversão da data em dataframe para depois ser tratada
-def build_time_features(df, date_col="date"):
-    df[date_col] = pd.to_datetime(df[date_col])
+def process_market(market_dir):
+    market_name = market_dir.name
+    print(f"\nProcessando mercado: {market_name}")
 
-    # separação dos dados em categorias de tempo diferentes
-    df["year"] = df[date_col].dt.year
-    df["month"] = df[date_col].dt.month
-    df["week"] = df[date_col].dt.isocalendar().week.astype(int)
-    df["day"] = df[date_col].dt.day
-    df["dayofweek"] = df[date_col].dt.dayofweek
-    df["is_weekend"] = df["dayofweek"].isin([5, 6]).astype(int)
+    out_market_dir = OUTPUT_DIR / market_name
+    out_market_dir.mkdir(exist_ok=True)
 
-    return df
+    for file in market_dir.glob("*.csv"):
+        print(f"  Gerando features para {file.name}")
 
-# Criação de features de atraso a serem utilizadas posteriormente separante em 1, 7 e 14 dias
-def build_lag_features(
-    df,
-    target_col,
-    group_cols,
-    lags=(1, 7, 14)
-):
-    # Para cada lag cria uma nova coluna com os dados a respectiva lag
-    for lag in lags:
-        # Criação de coluna conforme a categoria, separa os produtos em colunas e agrupa os valores anteriores
-        df[f"{target_col}_lag_{lag}"] = (
-            df
-            .groupby(group_cols)[target_col]
-            .shift(lag)
+        df = pd.read_csv(file)
+        print(df.columns.tolist())
+
+        X, y = build_features(
+            df,
+            target_col="Quantity",
+            date_col="date",
+            window=14
         )
-    return df
 
-# Features para construção de media moveis de acordo com a tendencia
-def build_rolling_features(
-    df,
-    target_col,
-    group_cols,
-    windows=(7, 14)
-):
-    # Testa diverentes janelas de memoria 
-    for window in windows:
-        # Cria e nomeia a nova coluna de acordo com a categoria
-        df[f"{target_col}_rolling_mean_{window}"] = (
-            df
-            # Agrupa os itens e fundamenta baseando-se em dados anteriores e calcula a media dos ultimos 7 dias
-            .groupby(group_cols)[target_col]
-            .shift(1)
-            .rolling(window)
-            .mean()
-        )
-    return df
+        np.save(out_market_dir / f"X_{file.stem}.npy", X)
+        np.save(out_market_dir / f"y_{file.stem}.npy", y)
+        
+        output_path = out_market_dir / file.name
 
-# Cria uma feature que preve as vendas, define a data como coluna temporal e aprogupa o produto do mercado
-def build_features(
-    df,
-    target_col,
-    date_col="date",
-    group_cols=("product_id", "market")
-):
-    # Ordem de agrupamento crescente
-    df = df.sort_values([*group_cols, date_col]).reset_index(drop=True)
-    # Transforma os dados para que sejam mes, dia , dia da semana.
-    df = build_time_features(df, date_col)
-    # Cria e monitora a venda do ultimo dia, ultimos 7 e 14.
-    df = build_lag_features(df, target_col, group_cols)
-    # Calcula a tendencia com media movel
-    df = build_rolling_features(df, target_col, group_cols)
+        print(f"    Salvo em {output_path}")
 
-    return df
+def main():
+    for market_dir in INPUT_DIR.iterdir():
+        if market_dir.is_dir():
+            process_market(market_dir)
+
+
+if __name__ == "__main__":
+    main()

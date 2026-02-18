@@ -10,7 +10,7 @@ if str(root) not in sys.path:
     sys.path.append(str(root))
 
 try:
-    from .evaluate import evaluate
+    from src.models.evaluate import evaluate
 except ImportError:
     from evaluate import evaluate
 
@@ -118,8 +118,10 @@ def process_file(csv_file):
         # Transforma o id de volta em coluna para ser salvo em csv
         .reset_index()
     )
+    smape = results["smape"].mean()
+    print(f"FINAL sMAPE: {smape:.4f}")
 
-    return results
+    return smape
 
 
 def main():

@@ -1,17 +1,32 @@
+from pathlib import Path
+import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 from keras.models import Sequential
 from keras.layers import GRU, Dense
 from keras.callbacks import EarlyStopping
+import tensorflow as tf
+import gc
+import sys
 
-from .evaluate import evaluate
+# Garante import correto
+file_path = Path(__file__).resolve()
+root = file_path.parents[2]
+if str(root) not in sys.path:
+    sys.path.append(str(root))
 
-# ================= CONFIGURAÇÕES =================
+from src.models.evaluate import evaluate
+
 
 WINDOW = 14      # Janela de dias anteriores para predição
 BATCH_SIZE = 32  # Amostras por lote para controle de memória no Samsung Book 2
 EPOCHS = 50      # Máximo de iterações de treino
 PATIENCE = 6     # Tolerância para parada antecipada caso o erro não diminua
+
+INPUT_BASE = Path("Dados/features")
+OUTPUT_BASE = Path("Resultados/gru")
+OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
+
 
 TARGET = 'sales' # Variável dependente
 
@@ -21,7 +36,6 @@ FEATURES = [
     'weekofyear', 'month', 'lag_1', 'lag_7'
 ]
 
-# ================= SEQUENCIAMENTO CORRETO =================
 
 def create_sequences_by_product(df, features, target, window):
 
@@ -41,7 +55,6 @@ def create_sequences_by_product(df, features, target, window):
 
     return np.array(Xs), np.array(ys)
 
-# ================= MODELO =================
 
 def run_gru(train_df, test_df):
 
@@ -101,5 +114,53 @@ def run_gru(train_df, test_df):
 
     # Cálculo das métricas comparativas através do módulo evaluate
     metrics = evaluate(y_test_seq, preds, model_name="GRU")
+    print("\nResultados do Modelo:")
+    for k, v in metrics.items():
+        print(f"{k}: {v:.4f}")
+    
+    print(f"FINAL sMAPE: {metrics['smape']:.4f}")
 
-    return preds, metrics
+    return preds, metrics["smape"]
+
+def process_file(csv_file):
+
+    df = pd.read_csv(csv_file, parse_dates=['Date'])
+
+    df = df.sort_values(['product_id', 'Date'])
+
+    train = df[df['split'] == 'train']
+    test  = df[df['split'] == 'test']
+
+    if len(train) < 200 or len(test) < 30:
+        return None
+
+    return run_gru(train, test)
+
+def main():
+
+    for market_path in INPUT_BASE.iterdir():
+        if not market_path.is_dir():
+            continue
+
+        market_name = market_path.name
+        print(f"\nRodando GRU em: {market_name}")
+
+        all_results = []
+
+        for csv_file in market_path.glob("cat*.csv"):
+            result = process_file(csv_file)
+
+            if result:
+                preds, metrics = result
+                metrics["arquivo"] = csv_file.name
+                all_results.append(metrics)
+
+        if all_results:
+            final = pd.DataFrame(all_results)
+            out_file = OUTPUT_BASE / f"{market_name}_gru.csv"
+            final.to_csv(out_file, index=False)
+            print(f"  Resultados salvos em {out_file}")
+
+
+if __name__ == "__main__":
+    main()
