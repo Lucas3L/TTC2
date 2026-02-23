@@ -23,17 +23,17 @@ BATCH_SIZE = 32  # Amostras por lote para controle de memória no Samsung Book 2
 EPOCHS = 50      # Máximo de iterações de treino
 PATIENCE = 6     # Tolerância para parada antecipada caso o erro não diminua
 
-INPUT_BASE = Path("Dados/features")
+INPUT_BASE = Path("Dados/preprocessed")
 OUTPUT_BASE = Path("Resultados/gru")
 OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
 
 
-TARGET = 'sales' # Variável dependente
+TARGET = 'quantity' # Variável dependente
 
 # Variáveis independentes
 FEATURES = [
-    'price', 'on_promotion', 'dayofweek',
-    'weekofyear', 'month', 'lag_1', 'lag_7'
+     'onpromotion', 'unitvalue',
+     'holiday', 'month', 'day_of_week', 'is_weekend'
 ]
 
 
@@ -56,28 +56,35 @@ def create_sequences_by_product(df, features, target, window):
     return np.array(Xs), np.array(ys)
 
 
-def run_gru(train_df, test_df):
+def run_gru(train_df, val_df, test_df):
 
-    scaler_X = MinMaxScaler() # Normalizador para escala entre 0 e 1
+    scaler_x = MinMaxScaler() # Normalizador para escala entre 0 e 1
+    scaler_y = MinMaxScaler()
 
     # Ajuste do escalonador no treino e aplicação no teste para evitar vazamento
-    X_train = scaler_X.fit_transform(train_df[FEATURES])
-    X_test = scaler_X.transform(test_df[FEATURES])
+    train_df[FEATURES] = scaler_x.fit_transform(train_df[FEATURES])
+    train_df[[TARGET]] = scaler_y.fit_transform(train_df[[TARGET]])
+    
+    val_df[FEATURES] = scaler_x.transform(val_df[FEATURES])
+    val_df[[TARGET]] = scaler_y.transform(val_df[[TARGET]])
 
-    # Cópias para preservar os dados originais e aplicar os valores escalados
-    train_df_scaled = train_df.copy()
-    test_df_scaled = test_df.copy()
-
-    train_df_scaled[FEATURES] = X_train
-    test_df_scaled[FEATURES] = X_test
+    test_df[FEATURES] = scaler_x.transform(test_df[FEATURES])
+    test_df[[TARGET]] = scaler_y.transform(test_df[[TARGET]])
 
     # Geração das sequências temporais respeitando o isolamento por ID
-    X_train_seq, y_train_seq = create_sequences_by_product(
-        train_df_scaled, FEATURES, TARGET, WINDOW
+    X_train, y_train = create_sequences_by_product(
+        train_df, FEATURES, TARGET, WINDOW
     )
 
-    X_test_seq, y_test_seq = create_sequences_by_product(
-        test_df_scaled, FEATURES, TARGET, WINDOW
+    val_all = pd.concat([train_df, val_df])
+    test_all = pd.concat([val_df, test_df])
+
+    X_val, y_val = create_sequences_with_context(
+        val_all, WINDOW, FEATURES, TARGET
+    )
+
+    X_test, y_test = create_sequences_with_context(
+        test_all, WINDOW , FEATURES, TARGET
     )
 
     # Definição da arquitetura da rede neural recorrente
@@ -101,8 +108,8 @@ def run_gru(train_df, test_df):
 
     # Processo de ajuste de pesos 
     model.fit(
-        X_train_seq, y_train_seq,      # Sequências de treino e alvos reais
-        validation_split=0.1,          # Reserva 10% do treino para validação interna
+        X_train, y_train,      # Sequências de treino e alvos reais
+        validation_data=(X_val, y_val),# Reserva treino para validação interna
         epochs=EPOCHS,                 # Número de passagens completas pelos dados
         batch_size=BATCH_SIZE,         # Quantidade de dados por atualização de pesos
         callbacks=[early_stop],        # Aciona o EarlyStopping se necessário
@@ -110,31 +117,67 @@ def run_gru(train_df, test_df):
     )
 
     # Execução das predições sobre os dados de teste janelados
-    preds = model.predict(X_test_seq).ravel()
+    preds = model.predict(X_test).flatten()
+
+    y_test_inv = scaler_y.inverse_transform(y_test.reshape(-1, 1)).flatten()
+    preds_inv  = scaler_y.inverse_transform(preds.reshape(-1, 1)).flatten()
 
     # Cálculo das métricas comparativas através do módulo evaluate
-    metrics = evaluate(y_test_seq, preds, model_name="GRU")
+    metrics = evaluate(y_test_inv, preds_inv)
     print("\nResultados do Modelo:")
     for k, v in metrics.items():
         print(f"{k}: {v:.4f}")
     
-    print(f"FINAL sMAPE: {metrics['smape']:.4f}")
+    print(f"FINAL sMAPE: {metrics['sMAPE']:.4f}")
 
-    return preds, metrics["smape"]
+    return preds, metrics
+
+def create_sequences_with_context(df_all, window, features, target):
+
+    X, y = [], []
+
+    for pid, group in df_all.groupby('product_id'):
+        group = group.sort_values('date')
+
+        X_vals = group[features].astype(float).values
+        y_vals = group[target].astype(float).values
+
+        for i in range(len(X_vals) - window):
+            X.append(X_vals[i:i+window])
+            y.append(y_vals[i+window])
+
+    return np.array(X), np.array(y)
+
 
 def process_file(csv_file):
 
     df = pd.read_csv(csv_file, parse_dates=['Date'])
 
-    df = df.sort_values(['product_id', 'Date'])
+    df.columns = (
+    df.columns
+      .str.strip()
+      .str.lower()
+      .str.replace(' ', '_')
+    )   
 
-    train = df[df['split'] == 'train']
-    test  = df[df['split'] == 'test']
+    df = df.sort_values([ 'date'])
 
-    if len(train) < 200 or len(test) < 30:
+    n = len(df)
+
+    train_end = int(n * 0.70)
+    val_end  = int(n * 0.85)
+
+    train_df = df.iloc[:train_end].copy()
+    val_df   = df.iloc[train_end:val_end].copy()
+    test_df  = df.iloc[val_end:].copy()
+
+    print(f"Tamanho total: {n} | Treino: {len(train_df)} | Val: {len(val_df)} | Teste: {len(test_df)}")
+
+
+    if len(train_df) < WINDOW * 5:
         return None
 
-    return run_gru(train, test)
+    return run_gru(train_df, val_df, test_df)
 
 def main():
 

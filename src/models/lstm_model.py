@@ -1,16 +1,22 @@
 from pathlib import Path
 import sys
+import gc
+import os
+import random
+
+
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-import gc
+
+
 from sklearn.preprocessing import MinMaxScaler
 from keras.models import Sequential
 from keras.layers import LSTM, Dense
 from keras.callbacks import EarlyStopping
 import argparse
-import os
-import random
+
+
 
 file_path = Path(__file__).resolve()
 root = file_path.parents[2]
@@ -19,24 +25,27 @@ if str(root) not in sys.path:
 
 from src.models.evaluate import evaluate
 
+
+
+
 WINDOW = 14      # Janela de observação 14 dias
 BATCH_SIZE = 32  # Tamanho do lote para otimização de memória no i3
 EPOCHS = 50      # Limite de iterações de treino
 PATIENCE = 6     # Tolerância para intPerrupção antecipada 
 
 BASE_DIR = root
-INPUT_BASE = BASE_DIR / "Dados" / "features"
+INPUT_BASE = BASE_DIR / "Dados" / "preprocessed"
 OUTPUT_BASE = BASE_DIR / "Resultados" / "lstm"
 OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
 
-
-TARGET = 'sales' # Variável alvo
-
-# Atributos explicativos selecionados
+TARGET = 'quantity'
 FEATURES = [
-    'price', 'on_promotion', 'dayofweek',
-    'weekofyear', 'month', 'lag_1', 'lag_7'
+     'onpromotion', 'unitvalue',
+    'holiday', 'month', 'day_of_week', 'is_weekend'
 ]
+
+
+
 
 def set_global_seed(seed: int):
     os.environ["PYTHONHASHSEED"] = str(seed)
@@ -44,6 +53,9 @@ def set_global_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     tf.random.set_seed(seed)
+
+
+
 
 def build_lstm_model(input_shape):
     # Arquitetura simplificada para evitar overfitting em séries curtas
@@ -60,6 +72,8 @@ def build_lstm_model(input_shape):
     return model
 
 
+
+
 def create_sequences_with_context(df_all, df_target, window, features, target):
     X, y = [], []
     
@@ -74,8 +88,9 @@ def create_sequences_with_context(df_all, df_target, window, features, target):
         if len(df_all_p) < window + 1:
             continue
         
-        X_vals = df_all_p[features].values
-        y_vals = df_all_p[target].values
+        X_vals = df_all_p[features].astype(float).values
+        y_vals = df_all_p[target].astype(float).values
+        
         
         # Calcula o índice de início para não perder dados do conjunto alvo
         idx_start = len(df_all_p) - len(df_tar_p) - window
@@ -91,26 +106,60 @@ def create_sequences_with_context(df_all, df_target, window, features, target):
     return np.array(X), np.array(y)
 
 
+
+
+def create_sequences_simple(df, window, features, target):
+    X, y = [], []
+    values_x = df[features].astype(float).values
+    values_y = df[target].astype(float).values
+
+    for i in range(len(df) - window):
+        X.append(values_x[i:i+window])
+        y.append(values_y[i+window])
+
+    return np.array(X), np.array(y)
+
+
+
+
 def process_file_lstm(path):
 
     # Carregamento e tipagem de data
     df = pd.read_csv(path, parse_dates=['Date'])
-    
+
+    df.columns = (
+        df.columns
+        .str.strip()
+        .str.lower()
+        .str.replace(' ', '_')
+    )
+
     # Limpeza de registros sem alvo
     df = df.dropna(subset=[TARGET])
 
     # Separação baseada no split original do dataset
-    train_df = df[df['split'] == 'train'].copy()
-    val_df   = df[df['split'] == 'val'].copy()
-    test_df  = df[df['split'] == 'test'].copy()
+    df = df.sort_values("date")
+
+    n = len(df)
+    train_end = int(n * 0.70)
+    val_end   = int(n * 0.85)
+
+    train_df = df.iloc[:train_end].copy()
+    val_df   = df.iloc[train_end:val_end].copy()
+    test_df  = df.iloc[val_end:].copy()
 
     # Cláusula de guarda para volume mínimo de treino
     if len(train_df) < 200:
+        print(f"    Poucos dados treino ({len(train_df)}) em {path.name}")
+
         return None
 
     scaler_x = MinMaxScaler()
     scaler_y = MinMaxScaler()
 
+    train_df[FEATURES] = train_df[FEATURES].astype(float)
+    val_df[FEATURES]   = val_df[FEATURES].astype(float)
+    test_df[FEATURES]  = test_df[FEATURES].astype(float)
     
     train_df.loc[:, FEATURES] = scaler_x.fit_transform(train_df[FEATURES])
     train_df.loc[:, [TARGET]] = scaler_y.fit_transform(train_df[[TARGET]])
@@ -123,24 +172,27 @@ def process_file_lstm(path):
    
    
     # Geração de sequências de treino
-    X_train, y_train = create_sequences_with_context(
-        train_df, train_df, WINDOW, FEATURES, TARGET
+    X_train, y_train = create_sequences_simple(
+        train_df, WINDOW, FEATURES, TARGET
     )
-
     # Concatenação para prover contexto  aos conjuntos de Validação e Teste
     val_all  = pd.concat([train_df, val_df])
     test_all = pd.concat([val_df, test_df])
 
     X_val, y_val = create_sequences_with_context(
-        val_all, val_df, WINDOW, FEATURES, TARGET
+        pd.concat([train_df, val_df]),
+        val_df, WINDOW, FEATURES, TARGET
     )
 
     X_test, y_test = create_sequences_with_context(
-        test_all, test_df, WINDOW, FEATURES, TARGET
+        pd.concat([val_df, test_df]),
+        test_df, WINDOW, FEATURES, TARGET
     )
 
     # Valida se o janelamento gerou dados de teste
     if len(X_test) == 0:
+        print(f"    X_test vazio em {path.name}")
+
         return None
 
     # Inicialização do modelo Keras
@@ -173,8 +225,15 @@ def process_file_lstm(path):
     gc.collect()
 
     metrics = evaluate(y_test_inv, preds_inv)
-    print(f"FINAL sMAPE: {metrics['smape']:.4f}")
+    print(
+        f"    FINAL -> MAE: {metrics['MAE']:.4f} | "
+        f"RMSE: {metrics['RMSE']:.4f} | "
+        f"sMAPE: {metrics['sMAPE']:.4f}"
+    )
     return metrics
+
+
+
 
 def main():
 
@@ -195,7 +254,10 @@ def main():
         for csv_file in market_path.glob("cat*.csv"):
             metrics = process_file_lstm(csv_file)
 
-            if metrics:
+            if metrics is None:
+                print(f"  Arquivo ignorado: {csv_file.name}")
+
+            else:
                 metrics["arquivo"] = csv_file.name
                 all_results.append(metrics)
 
@@ -204,7 +266,6 @@ def main():
             out_file = OUTPUT_BASE / f"{market_name}_lstm.csv"
             final.to_csv(out_file, index=False)
             print(f"  Resultados salvos em {out_file}")
-
 
 if __name__ == "__main__":
     main()
