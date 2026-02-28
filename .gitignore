@@ -1,6 +1,8 @@
 # Dados (não versionar)
 Dados/
 
+.venv
+
 # Resultados gerados
 results/
 Resultados/
