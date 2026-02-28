@@ -1,163 +1,124 @@
 from pathlib import Path
 import pandas as pd
+import numpy as np
+import os
+import gc
+import argparse
 import sys
 
-import numpy as np
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.preprocessing import MinMaxScaler
+
+# imports utilitários
+from src.utils.reproducibility import set_global_seed
+from src.utils.helpers import ensure_dir, normalize_columns, add_lag_features
+from src.models.evaluate import evaluate
+
+# Caminhos base usando raiz do projeto para evitar dependência de cwd
+file_path = Path(__file__).resolve()
+root = file_path.parents[2]
+INPUT_BASE = root / "Dados" / "preprocessed"
+OUTPUT_BASE = root / "Resultados" / "baseline_strong"
+ensure_dir(OUTPUT_BASE)
+
+TARGET = "quantity"
+FEATURES_BASE = ["onpromotion", "unitvalue", "holiday", "month", "day_of_week", "is_weekend"]
+
+WINDOW = 7  # opcional, para gerar lags
 
 
-# Definição dos caminhos
-INPUT_BASE = Path("Dados/split")
-OUTPUT_BASE = Path("Resultados/baseline")
 
-# Verificação e Criação de Pastas
-if not INPUT_BASE.exists():
-    print(f"Erro: A pasta de entrada {INPUT_BASE} não existe!")
-    sys.exit()
-else:
-    print(f"Pasta de entrada encontrada: {INPUT_BASE}")
 
-# Cria a pasta de saída (caso não exista)
-OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
-print(f"Pasta de saída criada {OUTPUT_BASE}")
+# Forecast simples: usa último valor do lag mais recente
+def naive_lag_forecast(df, feature="lag_1"):
+    return df[feature]
 
-# Guarda os valores de quantidade para serem usados
-TARGET = "Quantity"
-
-# função que compara os valores reais e preditos 
-def evaluate(y_true, y_pred):
-    y_true = np.array(y_true)
-    y_pred = np.array(y_pred)
-
-    # Media dos erros entre reais e predição
-    mae = mean_absolute_error(y_true, y_pred)
-    # Média dos erros ao quadrado entre reais e predição
-    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-    # Mostra a porcentagem de erros por magnitude
-    smape = (
-        np.mean(
-            2 * np.abs(y_true - y_pred) /
-            (np.abs(y_true) + np.abs(y_pred) + 1e-8)
-        ) * 100
-    )
-    return mae, rmse, smape
-
-# Função que utiliza o modelo naive, que ultiliza o ultimo valor registrado para comparar
-def naive_forecast(series):
-    return series.shift(1)
-
-# Função que utiliza a media movel simples para comparar reais e predição dos ultimos 7 dias
-def moving_average_forecast(series, window=7):
-    return series.shift(1).rolling(window).mean()
-
-# Copia os dados e extrai o dia da semana e adiciona outra coluna dia da semana dow
-def seasonal_forecast(train, test, target):
-    mean_by_dow = (
-        train
-        .groupby(train["Date"].dt.dayofweek)[target]
-        .mean()
-    )
-    # para cada linha do conjunto identifica o dia da semana
-    preds = test["Date"].dt.dayofweek.map(mean_by_dow)
-
-    return preds
-
-# Função de processamento do arquivo csv
+# Processa cada arquivo
 def process_file(csv_file):
-    # carrega os arquivos para a memeoria
     df = pd.read_csv(csv_file, parse_dates=["Date"])
-    # Ordena pela data de forma hierarquica de acordo com a categoria
-    df = df.sort_values(["market", "category", "product_id", "Date"])
-    # limpa os dados nulos
+    df = normalize_columns(df)
     df = df.dropna(subset=[TARGET])
-
-# inicia um array vazio para guardar os resultados
+    df = df.sort_values(["product_id", "date"])
     results = []
 
-    # Laõ que divide os dados por id de produto, 
-    # separa os dados de treino, teste e validação
-    for product_id, g in df.groupby("product_id"):
-        train = g[g["split"] == "train"]
-        val = g[g["split"] == "val"]
-        test = g[g["split"] == "test"]
+    for pid, g in df.groupby("product_id"):
+        g = g.copy()
+        g = add_lag_features(g, TARGET, lags=[1, 7, 14]).dropna()
+        features = FEATURES_BASE + ["lag_1", "lag_7", "lag_14"]
 
-        # Ignora produtos sem dados de 7 a 14 dias
-        if len(train) < 14 or len(test) < 7:
+        # split treino/val/test
+        n = len(g)
+        train_end = int(n * 0.7)
+        val_end   = int(n * 0.85)
+        train_df = g.iloc[:train_end].copy()
+        val_df   = g.iloc[train_end:val_end].copy()
+        test_df  = g.iloc[val_end:].copy()
+
+        if len(train_df) < WINDOW or len(test_df) < 3:
             continue
 
-        # Concatena Validação e Teste para garantir que
-        #  o primeiro dia de teste tenha data de ontem
-        full_series = pd.concat([val[TARGET], test[TARGET]])
-        naive_pred_full = naive_forecast(full_series)
+        # log-transform target
+        for subset in [train_df, val_df, test_df]:
+            subset.loc[:, TARGET] = np.log1p(subset[TARGET].clip(lower=0))
 
-        # Validação e definição apenas dos dias de teste
-        naive_pred = naive_pred_full.iloc[-len(test):]
+        # normalização simples MinMax baseada no treino
+        scaler = MinMaxScaler()
+        train_df.loc[:, features] = scaler.fit_transform(train_df[features])
+        val_df.loc[:, features] = scaler.transform(val_df[features])
+        test_df.loc[:, features] = scaler.transform(test_df[features])
 
-        # União de teste, treino e validação
-        ma_pred = moving_average_forecast(
-            pd.concat([train[TARGET], val[TARGET], test[TARGET]])
-        ).iloc[-len(test):]
+        # previsão usando lag 1 (baseline forte)
+        y_pred = naive_lag_forecast(test_df, "lag_1")
+        y_true = np.expm1(test_df[TARGET])
 
-        # Mapeoa de acordo com os dias da semana
-        seasonal_pred = seasonal_forecast(train, test, TARGET)
+        y_pred = np.expm1(y_pred)  # retorna à escala original
 
-        # Isola valores de quantidade do periodo de testes
-        y_true = test[TARGET]
-
-
-        # Calcule uma unica vez por modelo
-        n_mae, n_rmse, n_smape = evaluate(y_true, naive_pred)
-        ma_mae, ma_rmse, ma_smape = evaluate(y_true, ma_pred)
-        s_mae, s_rmse, s_smape = evaluate(y_true, seasonal_pred)
+        metrics = evaluate(y_true, y_pred)
 
         results.append({
-            # identificadores dos resultados
-            "naive_mae": n_mae,
-            "naive_rmse": n_rmse,
-            "naive_smape": n_smape,
-            
-            "ma7_mae": ma_mae,
-            "ma7_rmse": ma_rmse,
-            "ma7_smape": ma_smape,  
-            
-            "seasonal_mae": s_mae,
-            "seasonal_rmse": s_rmse,
-            "seasonal_smape": s_smape
+            "model": "baseline_strong",
+            "arquivo": csv_file.name,
+            "product_id": pid,
+            "mae": metrics["MAE"],
+            "rmse": metrics["RMSE"],
+            "smape": metrics["sMAPE"]
         })
-    # Retorna os resultados dos modelos
+
+        gc.collect()
+
     return pd.DataFrame(results)
 
-
+# Main
 def main():
-    # Percore dentro das pastas Dados/split cada um dos mercados
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--scenario", type=str, default=None,
+                        help="Cenário a ser aplicado (volume, price, kmeans)")
+    args = parser.parse_args()
+    
+    set_global_seed(args.seed)
+    
     for market_path in INPUT_BASE.iterdir():
-        # Valida se é um diretoria e não arquivos
         if not market_path.is_dir():
             continue
-        # Salva o nome do mercado
+
         market_name = market_path.name
-        print(f"\nRodando baseline em: {market_name}")
+        print(f"\nRodando baseline forte em: {market_name}")
 
-        # array para salvar os resultados
         all_results = []
-
-        # Laço que percorre tos os arquivos com cat do csv dentro de meracado
         for csv_file in market_path.glob("cat*.csv"):
             df_res = process_file(csv_file)
-            all_results.append(df_res)
+            if not df_res.empty:
+                all_results.append(df_res)
 
-        # Verifica se contem dados, se tem devem ser empilhados 
-        # e zera o index para iniciar do 0 ....
         if all_results:
             final = pd.concat(all_results, ignore_index=True)
-
-            # Construi o caminho até o local e salva os dados no diretorio  
-            out_file = OUTPUT_BASE / f"{market_name}_baseline.csv"
+            out_file = OUTPUT_BASE / f"{market_name}_baseline_strong.csv"
             final.to_csv(out_file, index=False)
-
             print(f"  Resultados salvos em {out_file}")
+            
+            mean_smape = final['smape'].mean()
+            print(f"FINAL sMAPE: {mean_smape:.4f}")
 
 # PONTO DE ENTRADA
-# Proteção caso o scrip seja utilizado em outra chamada para reutilização
 if __name__ == "__main__":
     main()

@@ -10,160 +10,152 @@ from pathlib import Path
 from datetime import datetime
 import argparse
 
-# Semente base para garantir que os experimentos sejam replicáveis
+# --- CONFIGURAÇÕES GLOBAIS ---
 RANDOM_SEED = 42
-# Número de execuções por modelo para permitir análise de desvio padrão
 N_REPLICAS = 3
+SCENARIOS = ["volume", "price", "kmeans"]
 
-# Gestão de caminhos robusta utilizando Pathlib para evitar erros de diretório
 BASE_DIR = Path(__file__).resolve().parent
 SRC_DIR = BASE_DIR / "src"
 
-# Define e garante a existência da pasta de resultados
-LOG_DIR = BASE_DIR / "results"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+# Import utilitário para garantir diretórios
+try:
+    from src.utils.helpers import ensure_dir
+except ImportError:
+    # Fallback caso o helper não esteja acessível
+    def ensure_dir(path):
+        Path(path).mkdir(parents=True, exist_ok=True)
+        return Path(path)
 
-LOG_FILE = LOG_DIR / "experimental_results.csv"
+OUTPUT_DIR = ensure_dir(BASE_DIR / "Resultados")
+ERROR_LOG = OUTPUT_DIR / "errors.log"
 
-# Dicionário de mapeamento dos scripts dos modelos 
+# Dicionário de mapeamento dos scripts
 MODELS = {
     "LSTM": SRC_DIR / "models" / "lstm_model.py",
     "GRU": SRC_DIR / "models" / "gru_model.py",
-    "XGBoost": SRC_DIR / "models" / "xgboost_model.py"
+    "XGBoost": SRC_DIR / "models" / "xgboost_model.py",
+    "Baseline": SRC_DIR / "models" / "baseline.py"
 }
 
 def set_global_seed(seed: int = 42):
-    """
-    Garante reprodutibilidade total do pipeline travando as sementes
-    do Python, Numpy e TensorFlow de forma global.
-    """
     os.environ["PYTHONHASHSEED"] = str(seed)
-    os.environ["TF_DETERMINISTIC_OPS"] = "1" # Força algoritmos determinísticos no TF
+    os.environ["TF_DETERMINISTIC_OPS"] = "1"
     random.seed(seed)
     np.random.seed(seed)
     tf.random.set_seed(seed)
 
-def extract_smape(output: str):
+def extract_metrics(output: str):
     """
-    Utiliza Regex para localizar o valor do sMAPE no console do script filho.
-    Exemplo esperado no print do modelo: 'FINAL sMAPE: 12.34'
+    Extração universal via Regex. 
+    Busca padrões como 'FINAL sMAPE: 10.5' ou 'MAE: 2.3'
     """
-    match = re.search(r"FINAL sMAPE:\s*([\d\.]+)", output)
-    if match:
-        return float(match.group(1))
-    return None
+    metrics = {}
+    patterns = {
+        "smape": r"FINAL sMAPE:\s*([\d\.]+)",
+        "mae": r"MAE:\s*([\d\.]+)",
+        "rmse": r"RMSE:\s*([\d\.]+)"
+    }
+    
+    for key, pattern in patterns.items():
+        match = re.search(pattern, output)
+        metrics[key] = float(match.group(1)) if match else None
+    return metrics
 
+def run_model(model_name, script_path, seed, replica_id, scenario):
+    # 1. Verificação de Paths e Arquivos
+    if not script_path.exists():
+        msg = f"[ERRO] Script não encontrado: {script_path}"
+        print(msg)
+        with open(ERROR_LOG, "a") as f: 
+            f.write(f"{datetime.now()} | {msg}\n")
+        return None, 0, "MISSING"
 
-def run_model(model_name, script_path, seed, replica_id):
-    """
-    Dispara a execução do modelo em um processo isolado via subprocess.
-    """
-    print(f"\n Executando {model_name} | Réplica {replica_id} | Seed {seed}")
+    print(f"\n>>> {model_name} | Cenário: {scenario} | Réplica: {replica_id} | Seed: {seed}")
 
     start_time = time.time()
 
-    # Executa o comando 'python script.py --seed X' e captura a saída
+    # 2. Execução via Subprocess
+    # Nota: Passamos as flags que todos os seus scripts agora aceitam
     process = subprocess.run(
-        ["python", str(script_path), "--seed", str(seed)],
+        ["python", str(script_path), "--seed", str(seed), "--scenario", str(scenario)],
         capture_output=True,
         text=True
     )
 
-    # Calcula o tempo total de processamento do modelo
     runtime = time.time() - start_time
-    # Une a saída padrão e de erro para facilitar o debug caso falhe
     output = process.stdout + process.stderr
-
-    # Verifica se o processo terminou sem erros 
     status = "OK" if process.returncode == 0 else "ERRO"
 
-    smape = extract_smape(output)
+    # 3. Extração de Métricas Universal
+    results = extract_metrics(output)
 
     if status == "ERRO":
-        print(f" Erro ao executar {model_name}")
-        print(output)
+        print(f" [!] Falha na execução do {model_name}. Verifique o error.log")
+        with open(ERROR_LOG, "a", encoding="utf-8") as f:
+            f.write(f"\n[{datetime.now()}] {model_name} | {scenario} | replica {replica_id} | SEED {seed}\n")
+            f.write(output)
+            f.write("\n" + "="*60 + "\n")
     else:
-        print(f" {model_name} finalizado em {runtime:.2f}s | sMAPE: {smape}")
+        print(f" [+] Finalizado em {runtime:.2f}s | sMAPE: {results.get('smape')}")
 
-    return smape, runtime, status, output
+    return results, runtime, status
 
+def log_result(model_name, replica_id, seed, metrics, runtime, status, scenario):
+    scenario_file = OUTPUT_DIR / f"{scenario}_results.csv"
+    file_exists = scenario_file.exists()
 
-def init_csv():
-    """
-    Inicializa o arquivo de log com o cabeçalho científico.
-    """
-    if not LOG_FILE.exists():
-        with open(LOG_FILE, mode="w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                "timestamp",
-                "model",
-                "replica",
-                "seed",
-                "smape",
-                "runtime_sec",
-                "status"
-            ])
-
-
-def log_result(model_name, replica_id, seed, smape, runtime, status):
-    """
-    Persiste os dados da rodada no CSV para posterior análise estatística.
-    """
-    with open(LOG_FILE, mode="a", newline="", encoding="utf-8") as f:
+    with open(scenario_file, mode="a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(["timestamp", "model", "replica", "seed", "smape", "mae", "rmse", "runtime_sec", "status"])
+        
         writer.writerow([
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             model_name,
             replica_id,
             seed,
-            smape,
+            metrics.get("smape"),
+            metrics.get("mae"),
+            metrics.get("rmse"),
             round(runtime, 3),
             status
         ])
 
-
 def main():
-    print("\n================ INICIANDO EXPERIMENTOS =================\n")
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     
-    # Use a função que criamos antes para travar tudo
     set_global_seed(args.seed)
 
-    init_csv()
-
-    # Loop de réplicas para garantir significância estatística dos resultados
+    print(f"\n================ INICIANDO EXPERIMENTOS ({datetime.now().year}) ================")
+    
     for replica_id in range(1, N_REPLICAS + 1):
-        # Altera a semente a cada réplica para explorar diferentes inicializações
-        current_seed = RANDOM_SEED + replica_id
+        # Semente variando por réplica para garantir robustez estatística
+        current_seed = RANDOM_SEED + (replica_id * 100)
+        
+        for scenario in SCENARIOS:
+            for model_name, script_path in MODELS.items():
+                
+                # Executa o modelo
+                metrics, runtime, status = run_model(
+                    model_name, script_path, current_seed, replica_id, scenario
+                )
 
-        print(f"\n========== RÉPLICA {replica_id} | SEED {current_seed} ==========\n")
+                # 4. Gestão de falhas: Se o script falhar, logamos mas o main continua
+                if metrics is not None:
+                    log_result(
+                        model_name, replica_id, current_seed, 
+                        metrics, runtime, status, scenario
+                    )
+                
+                # Controle de memória preventivo (opcional se scripts filhos já fazem gc)
+                tf.keras.backend.clear_session()
 
-        # Itera sobre os modelos definidos para comparação
-        for model_name, script_path in MODELS.items():
-            smape, runtime, status, output = run_model(
-                model_name,
-                script_path,
-                current_seed,
-                replica_id
-            )
-
-            # Grava o resultado no repositório central de métricas
-            log_result(
-                model_name,
-                replica_id,
-                current_seed,
-                smape,
-                runtime,
-                status
-            )
-
-    print("\n================ EXPERIMENTOS FINALIZADOS ================\n")
-    print(f" Resultados salvos em: {LOG_FILE}")
-
+    print(f"\n================ EXPERIMENTOS FINALIZADOS ================")
+    print(f"Logs de erro (se houver): {ERROR_LOG}")
+    print(f"Arquivos de resultados gerados em: {OUTPUT_DIR}")
 
 if __name__ == "__main__":
     main()

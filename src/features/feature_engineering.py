@@ -33,11 +33,22 @@ def create_sequences_by_product(df, features, target, window):
     # Conversão final para o formato de tensor 3D exigido por modelos LSTM e GRU
     return np.array(X_sequences), np.array(y_sequences)
 
+def add_price_segments(df):
+    # Segmentação por Preço (Quartis)
+    df['price_segment'] = pd.qcut(df['unitvalue'], 4, labels=[1, 2, 3, 4])
+    return df
+
+def add_volume_segments(df):
+    # Segmentação por Volume (Acima/Abaixo da Mediana)
+    median_vol = df.groupby('product_id')['quantity'].transform('sum').median()
+    df['volume_segment'] = df.groupby('product_id')['quantity'].transform('sum') >= median_vol
+    return df
+
 def build_features(
     df,
-    target_col="Quantity",
+    target_col="quantity",
     date_col="Date",
-    window=14
+    window=7
 ):
     features = [
         col for col in df.columns

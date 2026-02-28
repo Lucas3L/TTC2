@@ -1,8 +1,15 @@
 from pathlib import Path
 import pandas as pd
 
+
+
+
 # Define o diretório raiz onde os CSVs de cada modelo foram salvos
-RESULTS_PATH = Path("Resultados")
+BASE_DIR = Path(__file__).resolve().parents[2]
+RESULTS_PATH = BASE_DIR / "Resultados"
+
+
+
 
 def load_model_results(model_name):
     # Localiza arquivos CSV recursivamente que terminam com o sufixo do modelo
@@ -12,16 +19,28 @@ def load_model_results(model_name):
     for f in files:
         # Carrega os dados de métricas (mae, rmse, smape) salvos anteriormente
         df = pd.read_csv(f)
+
+        #Padroniza nomes das colunas
+        df.columns = df.columns.str.lower()
+
+        # Garante que todas as colunas existam
+        if "arquivo" not in df.columns:
+            df["arquivo"] = None
+
         # Extrai o nome do mercado do arquivo para identificação na tabela final
         df["market"] = f.stem.replace(f"_{model_name}", "")
-        dfs.append(df)
+        df["model"] = model_name
+
+        dfs.append(df[["model", "market", "arquivo", "mae", "rmse", "smape"]])
 
     # Cláusula de guarda para evitar erro de concatenação caso não encontre arquivos
     if not dfs:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["model", "market", "arquivo", "mae", "rmse", "smape"])
 
     # Une todos os mercados de um mesmo modelo em um único DataFrame
     return pd.concat(dfs, ignore_index=True)
+
+
 
 
 def aggregate_all_models():
@@ -34,7 +53,6 @@ def aggregate_all_models():
         df = load_model_results(model)
         if not df.empty:
             # Identifica a origem do dado antes da junção global
-            df["model"] = model
             all_data.append(df)
 
     # Consolida todos os modelos em uma base única para análise estatística
@@ -46,6 +64,8 @@ def aggregate_all_models():
 
     print(f"\n Resultados consolidados salvos em: {out}")
     return final
+
+
 
 
 if __name__ == "__main__":

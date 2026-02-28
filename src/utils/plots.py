@@ -10,6 +10,20 @@ plt.style.use("seaborn-v0_8-whitegrid")
 RESULTS_FILE = Path("Resultados/consolidated_results.csv")
 OUTPUT_DIR = Path("Resultados/plots")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True) # Cria a pasta de gráficos caso não exista
+COLUMN_MAP = {
+    "mae": ["mae", "mae_test", "MAE"],
+    "rmse": ["rmse", "rmse_test", "RMSE"],
+    "smape": ["smape", "smape_test", "SMAPE"]
+}
+
+
+
+def find_column(df, metric):
+    for col in COLUMN_MAP[metric]:
+        if col in df.columns:
+            return col
+    raise ValueError(f" Nenhuma coluna válida encontrada para {metric}")
+
 
 
 
@@ -48,8 +62,6 @@ def plot_metric(metric):
     plt.close() # Fecha a figura para liberar memória do Samsung Book 2
 
     print(f" Gráfico salvo em: {out_png}")
-
-
 
 
 

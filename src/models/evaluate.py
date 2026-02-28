@@ -1,30 +1,22 @@
 import numpy as np
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-def mae(y_true, y_pred):
-    # Retorna a média das diferenças absolutas
-    return np.mean(np.abs(y_true - y_pred))
-
-def rmse(y_true, y_pred):
-    # Retorna a raiz do erro quadrático médio
-    return np.sqrt(np.mean((y_true - y_pred) ** 2))
-
 def smape(y_true, y_pred):
     # Converte entradas para arrays e garante formato unidimensional para o cálculo
     y_true = np.asarray(y_true).reshape(-1)
     y_pred = np.asarray(y_pred).reshape(-1)
 
     # Cálculo da média das magnitudes para normalização simétrica do erro
-    denominator = (np.abs(y_true) + np.abs(y_pred)) / 2.0
+    denominator = (np.abs(y_true) + np.abs(y_pred))
     
     # Calcula a diferença absoluta ponderada pelo denominador simétrico
-    diff = np.abs(y_true - y_pred) / denominator
+    diff = 200 * np.abs(y_true - y_pred) / denominator
 
     # Cláusula de guarda: define erro como zero onde real e previsto são zero
     diff[denominator == 0] = 0.0
 
     # Retorna a média do erro percentual simétrico em escala de 0 a 100
-    return np.mean(diff) * 100
+    return np.mean(diff)
 
 
 def evaluate(y_true, y_pred):

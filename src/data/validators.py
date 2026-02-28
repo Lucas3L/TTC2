@@ -1,135 +1,84 @@
 import pandas as pd
 import numpy as np
 
-  # --- Coreção de datas temporais ---
 
-# Detectar datas faltantes e marcar como anomalias caso exceda o limite
+# --- Correção de datas temporais (usa 'date') ---
 def corrigir_datas_temporais(df, max_faltantes=2, anomalias=None):
     if anomalias is None:
         anomalias = []
 
-    # Copia e converte a coluna Date para datetime
     df = df.copy()
-    df["Date"] = pd.to_datetime(df["Date"])
+    # garante datetime em 'date'
+    df["date"] = pd.to_datetime(df["date"])
 
-    # Lista para novas linhas a serem adicionadas
     novos = []
-
-    # Separação de informações por pruduto
     for product_id, g in df.groupby("product_id"):
-        # Ordena por data
-        g = g.sort_values("Date")
-        # Extrai as datas
-        datas = g["Date"]
-
-        # Criação de sequencia de datas
-        esperado = pd.date_range(
-            # inicio
-            start=datas.min(),
-            # fim
-            end=datas.max(),
-            # frequência 
-            freq="D"
-        )
-        # Identificação de datas faltantes
+        g = g.sort_values("date")
+        datas = g["date"]
+        esperado = pd.date_range(start=datas.min(), end=datas.max(), freq="D")
         faltantes = esperado.difference(datas)
 
-        # Tratamento conforme quantidade de datas faltantes
         if 0 < len(faltantes) <= max_faltantes:
-            # Para cada data faltante, cria uma nova linha
             for data in faltantes:
-                # Cópia da última linha do grupo
                 linha = g.iloc[-1].copy()
-                # Atualiza a data e marca como interpolada
-                linha["Date"] = data
-                # Marca a observação como interpolada
+                linha["date"] = data
                 linha["observation"] = "date_interpolated"
-
-                # Zera os valores numéricos
-                for c in ["Quantity", "UnitValue", "ProductCost"]:
-                    # Define como NaN e zera o valor
+                for c in ["quantity", "unitvalue", "productcost"]:
                     if c in linha:
                         linha[c] = np.nan
-
-                # Guarda a nova linha para adição posterior
                 novos.append(linha)
-
-        # Esse item excede o limite de datas faltantes
         elif len(faltantes) > max_faltantes:
-            # fazer uma copia do grupo
             g = g.copy()
-            # Marca a observação como anomalia severa
             g["observation"] = "date_gap_severe"
-            # Adiciona todas as linhas do grupo como anomalias
             anomalias.extend(g.to_dict("records"))
 
-    # Adiciona as novas linhas ao DataFrame original
     if novos:
-        # Concatena os novos dados
         df = pd.concat([df, pd.DataFrame(novos)], ignore_index=True)
 
-    # retorna o DataFrame corrigido e as anomalias detectadas
     return df, anomalias
 
 
-    # --- Coreção de valores temporais ---
 
-# Corrigir valores inválidos (negativos ou nulos) usando média móvel
-def corrigir_valores_temporais(
-    df,
-    coluna,
-    window=7,
-    anomalias=None
-):
-    # Inicializa a lista de anomalias se não fornecida
+# --- Correção vetorizada de valores temporais ---
+def corrigir_valores_temporais(df, coluna, window=7, anomalias=None):
+    """Versão vetorizada que corrige valores <=0 ou NaN usando média móvel por produto.
+
+    Retorna (df, anomalias) para compatibilidade com o pipeline.
+    """
     if anomalias is None:
         anomalias = []
 
-    # Ordena o DataFrame por product_id e Date
-    df = df.sort_values(["product_id", "Date"]).copy()
+    df = df.copy()
 
-    # Processa cada grupo de product_id
-    for product_id, g in df.groupby("product_id"):
-        # Obtém os valores da coluna específica
-        valores = g[coluna]
+    # normaliza nome da coluna para lidar com inputs como 'Quantity' ou 'quantity'
+    col = coluna.lower()
 
-        # Itera sobre os índices do grupo
-        for idx in g.index:
-            # Obtém o valor atual
-            valor = df.at[idx, coluna]
+    # cria coluna observation se não existir
+    if "observation" not in df.columns:
+        df["observation"] = "ok"
 
-            # Se o valor for válido, continua
-            if pd.notna(valor) and valor > 0:
-                continue
+    # máscara de inválidos
+    invalid_mask = df[col].isna() | (df[col] <= 0)
 
-            # Define o intervalo de contexto para cálculo da média móvel
-            pos = g.index.get_loc(idx)
+    # média móvel por produto ignorando valores <= 0
+    rolling_mean = (
+        df.groupby("product_id")[col]
+        .transform(lambda x: x.where(x > 0).rolling(window=window, center=True, min_periods=1).mean())
+    )
 
-            # Calcula os índices de início e fim do contexto
-            ini = max(0, pos - window)
-            fim = min(len(g), pos + window + 1)
+    # aplica correção vetorizada
+    df.loc[invalid_mask, "observation"] = f"{col}_corrected_vectorized"
+    df[col] = df[col].where(~invalid_mask, rolling_mean)
 
-            # Extrai o contexto para cálculo da média móvel
-            contexto = valores.iloc[ini:fim].dropna()
+    # backup com média global por produto
+    global_mean = df.groupby("product_id")[col].transform("mean")
+    df[col] = df[col].fillna(global_mean)
 
-            # Se não houver contexto suficiente, marca como anomalia
-            if len(contexto) < 5:
-                # Marca como anomalia sem contexto suficiente
-                df.at[idx, "observation"] = f"{coluna}_invalid_no_context"
-                # Adiciona a anomalia à lista
-                anomalias.append(df.loc[idx].to_dict())
-                continue
-
-            # Calcula a média do contexto
-            media = contexto.mean()
-
-            # Se a média for positiva, corrige o valor
-            if media > 0:
-                df.at[idx, coluna] = abs(media)
-                df.at[idx, "observation"] = f"{coluna}_corrected_context"
-            # Se a média não for positiva, marca como anomalia severa
-            else:
-                df.at[idx, "observation"] = f"{coluna}_invalid_severe"
-                anomalias.append(df.loc[idx].to_dict())
+    # casos extremos: se ainda houver NaN, marca anomalia severa e preenche com 0
+    if df[col].isna().any():
+        anom_sev = df.loc[df[col].isna()].copy()
+        anom_sev["observation"] = f"{col}_invalid_severe"
+        anomalias.extend(anom_sev.to_dict("records"))
+        df[col] = df[col].fillna(0)
 
     return df, anomalias
