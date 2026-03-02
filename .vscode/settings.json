@@ -1,6 +1,8 @@
 {
   "python.analysis.extraPaths": [
-    "./.venv/Lib/site-packages"
+    "./.venv/Lib/site-packages",
+    "${workspaceFolder}/tcc_env/Scripts/python.exe",
+    "${workspaceFolder}/src"
   ],
   "python.analysis.indexing": true,
   "python.analysis.useLibraryCodeForTypes": true,

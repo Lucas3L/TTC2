@@ -1,10 +1,16 @@
 from pathlib import Path
-import pandas as pd
-import numpy as np
-import argparse
 import os
 import sys
 import gc
+import pandas as pd
+import numpy as np
+import argparse
+
+# Configurar path ANTES de importar módulos locais
+file_path = Path(__file__).resolve()
+root = file_path.parents[2]
+if str(root) not in sys.path:
+    sys.path.append(str(root))
 
 from sklearn.preprocessing import LabelEncoder, MinMaxScaler
 from xgboost import XGBRegressor
@@ -13,6 +19,7 @@ from xgboost import XGBRegressor
 from src.utils.helpers import ensure_dir, normalize_columns, add_lag_features
 from src.utils.reproducibility import set_global_seed
 from src.models.evaluate import evaluate
+from src.utils.metrics import naive_market_smape
 
 # imports de cenário opcionais
 try:
@@ -21,13 +28,6 @@ except ImportError:
     apply_scenario = None
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-
-file_path = Path(__file__).resolve()
-root = file_path.parents[2]
-if str(root) not in sys.path:
-    sys.path.append(str(root))
-
-from src.models.evaluate import evaluate
 
 TARGET = 'quantity'
 # atributos fixos; usaremos ramificações para adicionar lags dinamicamente
@@ -114,7 +114,10 @@ def process_file(csv_file, scenario=None):
     for pid_encoded, g in df.groupby('product_id_encoded'):
         g = g.copy()
         # adiciona lags antes de definir a lista de features usada pelo modelo
-        g = add_lag_features(g, TARGET, lags=[1, 7, 14]).dropna()
+        # create lags then only drop entries missing target or predictor features
+        g = add_lag_features(g, TARGET, lags=[1, 7, 14])
+        feat_cols = ['lag_1','lag_7','lag_14'] + [TARGET]
+        g = g.dropna(subset=feat_cols)
         features = FEATURES_BASE + ['lag_1', 'lag_7', 'lag_14']
 
         n = len(g)
@@ -135,9 +138,10 @@ def process_file(csv_file, scenario=None):
         # Escala os features com MinMaxScaler ajustado apenas no conjunto de treino
         scaler = MinMaxScaler()
         # garantir tipo numérico antes do fit/transform
-        train_df.loc[:, features] = train_df.loc[:, features].astype(float)
-        val_df.loc[:, features] = val_df.loc[:, features].astype(float)
-        test_df.loc[:, features] = test_df.loc[:, features].astype(float)
+        # ensure numeric type before scaling by assigning directly
+        train_df[features] = train_df[features].astype(float)
+        val_df[features]   = val_df[features].astype(float)
+        test_df[features]  = test_df[features].astype(float)
         scaler.fit(train_df.loc[:, features])
         train_df.loc[:, features] = scaler.transform(train_df.loc[:, features])
         val_df.loc[:, features] = scaler.transform(val_df.loc[:, features])
@@ -201,6 +205,10 @@ def main():
 
             mean_smap = final['smape'].mean()
             print(f"FINAL sMAPE: {mean_smap:.4f}")
+        else:
+            market_smap = naive_market_smape(market_path)
+            print(f"FALLBACK market sMAPE: {market_smap:.4f}")
+            print(f"FINAL sMAPE: {market_smap:.4f}")
 
 
 if __name__ == "__main__":

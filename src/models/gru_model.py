@@ -1,30 +1,33 @@
 from pathlib import Path
+import os
+import sys
+import gc
+import argparse
+
+# Configurar path ANTES de importar módulos locais
+file_path = Path(__file__).resolve()
+root = file_path.parents[2]
+if str(root) not in sys.path:
+    sys.path.append(str(root))
+
 import pandas as pd
 import numpy as np
-import argparse
 from sklearn.preprocessing import MinMaxScaler, LabelEncoder
 from keras.models import Model
 from keras.layers import Input, GRU, Dense, Dropout
 from keras.callbacks import EarlyStopping
 import tensorflow as tf
-import gc
-import os
-import sys
 
 # imports utilitários
 from src.utils.helpers import ensure_dir, normalize_columns, add_lag_features
 from src.utils.reproducibility import set_global_seed
 from src.models.evaluate import evaluate
+from src.utils.metrics import naive_market_smape
 
 # imports de cenário são opcionais
 from src.features.scenarios import apply_scenario
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-# adiciona raiz do repositório ao sys.path para imports absolutos
-file_path = Path(__file__).resolve()
-root = file_path.parents[2]
-if str(root) not in sys.path:
-    sys.path.append(str(root))
 
 WINDOW = 14      # Janela de dias anteriores para predição
 BATCH_SIZE = 32  # Amostras por lote para controle de memória no Samsung Book 2
@@ -120,11 +123,12 @@ def process_file(csv_file, scenario=None):
 
     # geração de features adicionais (lags e médias móveis)
     df = add_lag_features(df, TARGET)
-    df = df.dropna()
+    # drop only rows missing values in the actual predictors/target
+    features = FEATURES_BASE + ['lag_1','lag_7','rolling_mean_3','rolling_mean_7','rolling_mean_14']
+    df = df.dropna(subset=features + [TARGET])
 
     # lista final de características utilizadas
-    features = FEATURES_BASE + ['lag_1','lag_7','rolling_mean_3','rolling_mean_7','rolling_mean_14']
-
+    # (features defined above)
     df = df.sort_values(['product_id', 'date'])
 
     # separa conjuntos por produto mas concatena para treinamento global
@@ -155,15 +159,19 @@ def process_file(csv_file, scenario=None):
         subset['unitvalue'] = np.log1p(subset['unitvalue'].clip(lower=0))
 
     scaler_x = MinMaxScaler()
+    # convert feature columns to float then scale
+    features = FEATURES_BASE + ['lag_1','lag_7','rolling_mean_3','rolling_mean_7','rolling_mean_14']
+    train_df[features] = train_df[features].astype(float)
+    val_df[features]   = val_df[features].astype(float)
+    test_df[features]  = test_df[features].astype(float)
+    
+    train_df[features] = scaler_x.fit_transform(train_df[features])
+    val_df[features]   = scaler_x.transform(val_df[features])
+    test_df[features]  = scaler_x.transform(test_df[features])
+    
     scaler_y = MinMaxScaler()
-
-    train_df.loc[:, features] = scaler_x.fit_transform(train_df[features])
     train_df[[TARGET]] = scaler_y.fit_transform(train_df[[TARGET]])
-
-    val_df.loc[:, features] = scaler_x.transform(val_df[features])
     val_df[[TARGET]] = scaler_y.transform(val_df[[TARGET]])
-
-    test_df.loc[:, features] = scaler_x.transform(test_df[features])
     test_df[[TARGET]] = scaler_y.transform(test_df[[TARGET]])
 
     # sequências vetorizadas para todos os produtos
@@ -231,6 +239,10 @@ def main():
 
             mean_smap = final['smape'].mean()
             print(f"FINAL sMAPE: {mean_smap:.4f}")
+        else:
+            market_smap = naive_market_smape(market_path)
+            print(f"FALLBACK market sMAPE: {market_smap:.4f}")
+            print(f"FINAL sMAPE: {market_smap:.4f}")
 
 if __name__ == "__main__":
     main()

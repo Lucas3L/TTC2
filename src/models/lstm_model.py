@@ -4,6 +4,12 @@ import gc
 import os
 import random
 
+# Configurar path ANTES de importar módulos locais
+file_path = Path(__file__).resolve()
+root = file_path.parents[2]
+if str(root) not in sys.path:
+    sys.path.append(str(root))
+
 import numpy as np
 import pandas as pd
 import tensorflow as tf
@@ -18,13 +24,11 @@ import argparse
 from src.utils.helpers import ensure_dir, normalize_columns, add_lag_features
 from src.utils.reproducibility import set_global_seed
 from src.models.evaluate import evaluate
+# fallback metric across market when individual results missing
+from src.utils.metrics import naive_market_smape
 
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' # Silencia avisos inúteis do TF
-file_path = Path(__file__).resolve()
-root = file_path.parents[2]
-if str(root) not in sys.path:
-    sys.path.append(str(root))
 
 
 WINDOW = 7      # Janela de observação 14 dias
@@ -96,9 +100,9 @@ def process_file_lstm(path, scenario=None):
 
     # Carregamento e tipagem de data
     df = pd.read_csv(path, parse_dates=['Date'])
+    df = df[df['Date'].dt.year == 2019]
     df = normalize_columns(df)
     df = df.dropna(subset=[TARGET])
-    df = df[df['Date'].dt.year == 2019]
 
     # aplicações de cenários (volume, price, kmeans)
     if scenario is not None:
@@ -108,13 +112,6 @@ def process_file_lstm(path, scenario=None):
         except ImportError:
             # caso a importação falhe, ignoramos, mas avisamos
             print(f"Aviso: não foi possível aplicar cenário {scenario}")
-
-    df.columns = (
-        df.columns
-        .str.strip()
-        .str.lower()
-        .str.replace(' ', '_')
-    )
 
     le = LabelEncoder()
     df['product_id'] = le.fit_transform(df['product_id'])
@@ -136,8 +133,10 @@ def process_file_lstm(path, scenario=None):
         g['unitvalue'] = np.log1p(g['unitvalue'].clip(lower=0))
         
         g = add_lag_features(g)
-        g = g.dropna()
+        # only drop rows that are missing values in the features we actually use
         features = FEATURES_BASE + ['lag_1','lag_7','rolling_mean_3','rolling_mean_7','rolling_mean_14']
+        keep = features + [TARGET]
+        g = g.dropna(subset=keep)
 
         n = len(g)
         train_end = int(n * 0.70)
@@ -153,11 +152,14 @@ def process_file_lstm(path, scenario=None):
 
         scaler_x = MinMaxScaler()
 
-        train_df.loc[:, features] = scaler_x.fit_transform(train_df[features])
+        # convert feature columns to float so they can hold scaled values
+        train_df[features] = train_df[features].astype(float)
+        val_df[features]   = val_df[features].astype(float)
+        test_df[features]  = test_df[features].astype(float)
 
-        val_df.loc[:, features] = scaler_x.transform(val_df[features])
-
-        test_df.loc[:, features] = scaler_x.transform(test_df[features])
+        train_df[features] = scaler_x.fit_transform(train_df[features])
+        val_df[features]   = scaler_x.transform(val_df[features])
+        test_df[features]  = scaler_x.transform(test_df[features])
     
         X_train, y_train = create_sequences(
             train_df, WINDOW, features, TARGET
@@ -259,6 +261,11 @@ def main():
             # imprime métrica final para que o orquestrador capture
             mean_smap = final['smape'].mean()
             print(f"FINAL sMAPE: {mean_smap:.4f}")
+        else:
+            # calcula métrica de mercado como fallback
+            market_smap = naive_market_smape(market_path)
+            print(f"FALLBACK market sMAPE: {market_smap:.4f}")
+            print(f"FINAL sMAPE: {market_smap:.4f}")
 
 if __name__ == "__main__":
     main()

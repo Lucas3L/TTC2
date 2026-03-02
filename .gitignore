@@ -1,6 +1,7 @@
 # Dados (não versionar)
 Dados/
 
+/tcc_env
 .venv
 
 # Resultados gerados

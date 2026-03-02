@@ -1,21 +1,27 @@
 from pathlib import Path
+import os
+import sys
+import gc
 import pandas as pd
 import numpy as np
-import os
-import gc
 import argparse
-import sys
+
+# Configurar path ANTES de importar módulos locais
+file_path = Path(__file__).resolve()
+root = file_path.parents[2]
+if str(root) not in sys.path:
+    sys.path.append(str(root))
 
 from sklearn.preprocessing import MinMaxScaler
 
 # imports utilitários
 from src.utils.reproducibility import set_global_seed
 from src.utils.helpers import ensure_dir, normalize_columns, add_lag_features
+from src.utils.metrics import naive_market_smape
 from src.models.evaluate import evaluate
+from src.utils.metrics import naive_market_smape
 
 # Caminhos base usando raiz do projeto para evitar dependência de cwd
-file_path = Path(__file__).resolve()
-root = file_path.parents[2]
 INPUT_BASE = root / "Dados" / "preprocessed"
 OUTPUT_BASE = root / "Resultados" / "baseline_strong"
 ensure_dir(OUTPUT_BASE)
@@ -42,7 +48,10 @@ def process_file(csv_file):
 
     for pid, g in df.groupby("product_id"):
         g = g.copy()
-        g = add_lag_features(g, TARGET, lags=[1, 7, 14]).dropna()
+        g = add_lag_features(g, TARGET, lags=[1, 7, 14])
+        # baseline only uses lag columns and target, ignore others when dropping
+        feat_cols = ['lag_1','lag_7','lag_14', TARGET]
+        g = g.dropna(subset=feat_cols)
         features = FEATURES_BASE + ["lag_1", "lag_7", "lag_14"]
 
         # split treino/val/test
@@ -62,9 +71,14 @@ def process_file(csv_file):
 
         # normalização simples MinMax baseada no treino
         scaler = MinMaxScaler()
-        train_df.loc[:, features] = scaler.fit_transform(train_df[features])
-        val_df.loc[:, features] = scaler.transform(val_df[features])
-        test_df.loc[:, features] = scaler.transform(test_df[features])
+        # convert to float before scaling to avoid dtype errors
+        train_df[features] = train_df[features].astype(float)
+        val_df[features] = val_df[features].astype(float)
+        test_df[features] = test_df[features].astype(float)
+        
+        train_df[features] = scaler.fit_transform(train_df[features])
+        val_df[features] = scaler.transform(val_df[features])
+        test_df[features] = scaler.transform(test_df[features])
 
         # previsão usando lag 1 (baseline forte)
         y_pred = naive_lag_forecast(test_df, "lag_1")
@@ -118,6 +132,10 @@ def main():
             
             mean_smape = final['smape'].mean()
             print(f"FINAL sMAPE: {mean_smape:.4f}")
+        else:
+            market_smap = naive_market_smape(market_path)
+            print(f"FALLBACK market sMAPE: {market_smap:.4f}")
+            print(f"FINAL sMAPE: {market_smap:.4f}")
 
 # PONTO DE ENTRADA
 if __name__ == "__main__":

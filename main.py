@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from datetime import datetime
 import argparse
+import math
 
 # --- CONFIGURAÇÕES GLOBAIS ---
 RANDOM_SEED = 42
@@ -51,15 +52,27 @@ def extract_metrics(output: str):
     Busca padrões como 'FINAL sMAPE: 10.5' ou 'MAE: 2.3'
     """
     metrics = {}
+    # aceita formatos como 12.34, 1e-03, -2.5E+02 ou nan
+    float_re = r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?|nan|NaN)"
     patterns = {
-        "smape": r"FINAL sMAPE:\s*([\d\.]+)",
-        "mae": r"MAE:\s*([\d\.]+)",
-        "rmse": r"RMSE:\s*([\d\.]+)"
+        "smape": rf"FINAL sMAPE:\s*{float_re}",
+        "mae": rf"MAE:\s*{float_re}",
+        "rmse": rf"RMSE:\s*{float_re}"
     }
     
     for key, pattern in patterns.items():
         match = re.search(pattern, output)
-        metrics[key] = float(match.group(1)) if match else None
+        if not match:
+            metrics[key] = None
+            continue
+
+        val_str = match.group(1)
+        try:
+            val = float(val_str)
+            # normalize NaN to None for clearer downstream handling
+            metrics[key] = None if math.isnan(val) else val
+        except Exception:
+            metrics[key] = None
     return metrics
 
 def run_model(model_name, script_path, seed, replica_id, scenario):
@@ -80,7 +93,8 @@ def run_model(model_name, script_path, seed, replica_id, scenario):
     process = subprocess.run(
         ["python", str(script_path), "--seed", str(seed), "--scenario", str(scenario)],
         capture_output=True,
-        text=True
+        text=True,
+        cwd=str(BASE_DIR)
     )
 
     runtime = time.time() - start_time
