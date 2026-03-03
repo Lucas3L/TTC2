@@ -16,7 +16,7 @@ train_ratio = 0.7
 val_ratio = 0.15
 
 # Janela mínima para considerar um produto (evita splits inválidos)
-WINDOW = 14
+WINDOW = 7
 
 # Valida a pasta mercado dentro da entrada de dados, se não tiver continua
 for market_path in INPUT_BASE.iterdir():

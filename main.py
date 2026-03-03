@@ -13,7 +13,7 @@ import math
 
 # --- CONFIGURAÇÕES GLOBAIS ---
 RANDOM_SEED = 42
-N_REPLICAS = 3
+N_REPLICAS = 1
 SCENARIOS = ["volume", "price", "kmeans"]
 
 BASE_DIR = Path(__file__).resolve().parent
