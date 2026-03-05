@@ -12,22 +12,18 @@ root = file_path.parents[2]
 if str(root) not in sys.path:
     sys.path.append(str(root))
 
-from sklearn.preprocessing import MinMaxScaler
-
 # imports utilitários
 from src.utils.reproducibility import set_global_seed
 from src.utils.helpers import ensure_dir, normalize_columns, add_lag_features
 from src.utils.metrics import naive_market_smape
 from src.models.evaluate import evaluate
-from src.utils.metrics import naive_market_smape
 
 # Caminhos base usando raiz do projeto para evitar dependência de cwd
 INPUT_BASE = root / "Dados" / "preprocessed"
-OUTPUT_BASE = root / "Resultados" / "baseline_strong"
+OUTPUT_BASE = root / "Resultados" / "baseline_zero_aware"
 ensure_dir(OUTPUT_BASE)
 
 TARGET = "quantity"
-FEATURES_BASE = ["onpromotion", "unitvalue", "holiday", "month", "day_of_week", "is_weekend"]
 
 WINDOW = 7  # opcional, para gerar lags
 
@@ -38,58 +34,78 @@ WINDOW = 7  # opcional, para gerar lags
 def naive_lag_forecast(df, feature="lag_1"):
     return df[feature]
 
+def zero_aware_forecast(row):
+    zero_run = row.get("zero_run_length", 0)
+    occ_rate = row.get("occurrence_rate_14", 1.0)
+    rolling_mean = row.get("rolling_mean_7", 0)
+    pos_mean = row.get("positive_mean_7", 0)
+
+    # regra intermitente
+    if zero_run >= 3 and occ_rate <= 0.4:
+        return 0.0
+
+    if pos_mean > 0:
+        return pos_mean
+
+    return rolling_mean
+
 # Processa cada arquivo
 def process_file(csv_file):
-    df = pd.read_csv(csv_file, parse_dates=["Date"])
+    df = pd.read_csv(csv_file, parse_dates=["date"])
     df = normalize_columns(df)
     df = df.dropna(subset=[TARGET])
     df = df.sort_values(["product_id", "date"])
     results = []
 
     for pid, g in df.groupby("product_id"):
-        g = g.copy()
+        g = g.copy().sort_values("date")
+        g["zero_run_length"] = (
+            (g[TARGET] == 0)
+            .astype(int)
+            .groupby((g[TARGET] != 0).cumsum())
+            .cumsum()
+        )
+
+        g["occurrence_rate_14"] = (
+            (g[TARGET] > 0)
+            .rolling(14, min_periods=1)
+            .mean()
+        )
+
+        g["positive_mean_7"] = (
+            g[TARGET]
+            .where(g[TARGET] > 0)
+            .rolling(7, min_periods=1)
+            .mean()
+        )
+
+        g["rolling_mean_7"] = (
+            g[TARGET]
+            .rolling(7, min_periods=1)
+            .mean()
+        )
         g = add_lag_features(g, TARGET, lags=[1, 7, 14])
         # baseline only uses lag columns and target, ignore others when dropping
         feat_cols = ['lag_1','lag_7','lag_14', TARGET]
         g = g.dropna(subset=feat_cols)
-        features = FEATURES_BASE + ["lag_1", "lag_7", "lag_14"]
-
-        # split treino/val/test
+        
         n = len(g)
-        train_end = int(n * 0.7)
-        val_end   = int(n * 0.85)
-        train_df = g.iloc[:train_end].copy()
-        val_df   = g.iloc[train_end:val_end].copy()
-        test_df  = g.iloc[val_end:].copy()
 
-        if len(train_df) < WINDOW or len(test_df) < 3:
+        if n < 20:
             continue
 
-        # log-transform target
-        for subset in [train_df, val_df, test_df]:
-            subset.loc[:, TARGET] = np.log1p(subset[TARGET].clip(lower=0))
-
-        # normalização simples MinMax baseada no treino
-        scaler = MinMaxScaler()
-        # convert to float before scaling to avoid dtype errors
-        train_df[features] = train_df[features].astype(float)
-        val_df[features] = val_df[features].astype(float)
-        test_df[features] = test_df[features].astype(float)
+        split_idx = int(n * 0.8)
+        test_df  = g.iloc[split_idx:].copy()
         
-        train_df[features] = scaler.fit_transform(train_df[features])
-        val_df[features] = scaler.transform(val_df[features])
-        test_df[features] = scaler.transform(test_df[features])
+        if len(test_df) < 3:
+            continue
 
-        # previsão usando lag 1 (baseline forte)
-        y_pred = naive_lag_forecast(test_df, "lag_1")
-        y_true = np.expm1(test_df[TARGET])
-
-        y_pred = np.expm1(y_pred)  # retorna à escala original
-
+        y_pred = test_df.apply(zero_aware_forecast, axis=1)
+        y_true = test_df[TARGET]
         metrics = evaluate(y_true, y_pred)
 
         results.append({
-            "model": "baseline_strong",
+            "model": "baseline_zero_aware",
             "arquivo": csv_file.name,
             "product_id": pid,
             "mae": metrics["MAE"],
@@ -116,7 +132,7 @@ def main():
             continue
 
         market_name = market_path.name
-        print(f"\nRodando baseline forte em: {market_name}")
+        print(f"\nRodando baseline_zero_aware em: {market_name}")
 
         all_results = []
         for csv_file in market_path.glob("cat*.csv"):
@@ -126,7 +142,7 @@ def main():
 
         if all_results:
             final = pd.concat(all_results, ignore_index=True)
-            out_file = OUTPUT_BASE / f"{market_name}_baseline_strong.csv"
+            out_file = OUTPUT_BASE / f"{market_name}_baseline_zero_aware.csv"
             final.to_csv(out_file, index=False)
             print(f"  Resultados salvos em {out_file}")
             

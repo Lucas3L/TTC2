@@ -31,19 +31,20 @@ def process_market(market_dir):
         df = pd.read_csv(file)
         print(df.columns.tolist())
 
-        X, y = build_features(
+        X, y, w= build_features(
             df,
-            target_col="Quantity",
+            target_col="quantity",
             date_col="date",
-            window=14
+            window=7,
+            positive_weight=3.0
         )
 
         np.save(out_market_dir / f"X_{file.stem}.npy", X)
         np.save(out_market_dir / f"y_{file.stem}.npy", y)
-        
+        np.save(out_market_dir / f"w_{file.stem}.npy", w)    
         output_path = out_market_dir / file.name
 
-        print(f"    Salvo em {output_path}")
+        print(f"    Salvo em {out_market_dir}")
 
 def main():
     for market_dir in INPUT_DIR.iterdir():

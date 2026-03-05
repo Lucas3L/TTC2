@@ -1,7 +1,5 @@
 from pathlib import Path
 import pandas as pd
-import os
-
 
 def ensure_dir(path: Path):
     """Creates a directory if it does not already exist."""
@@ -32,3 +30,32 @@ def add_lag_features(df: pd.DataFrame, target: str = "quantity", lags=[1, 7, 14]
     df["rolling_mean_7"] = df[target].rolling(7).mean()
     df["rolling_mean_14"] = df[target].rolling(14).mean()
     return df
+
+
+
+def add_intermittent_features(df: pd.DataFrame, target: str = "quantity") -> pd.DataFrame:
+
+    out = df.copy()
+    y = out[target].fillna(0).astype(float)
+
+    out["is_zero"] = (y <= 0).astype(int)
+
+    zero_run = []
+    streak = 0
+    for val in out["is_zero"].values:
+        if val == 1:
+            streak += 1
+        else:
+            streak = 0
+        zero_run.append(streak)
+    out["zero_run_length"] = pd.Series(zero_run, index=out.index).shift(1).fillna(0)
+
+    occ = (y > 0).astype(float)
+    out["occurrence_rate_7"] = occ.shift(1).rolling(7, min_periods=1).mean()
+    out["occurrence_rate_14"] = occ.shift(1).rolling(14, min_periods=1).mean()
+
+    pos = y.where(y > 0)
+    out["positive_mean_7"] = pos.shift(1).rolling(7, min_periods=1).mean()
+    out["positive_mean_7"] = out["positive_mean_7"].fillna(0)
+
+    return out

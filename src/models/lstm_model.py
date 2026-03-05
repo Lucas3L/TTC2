@@ -2,7 +2,7 @@ from pathlib import Path
 import sys
 import gc
 import os
-import random
+import argparse
 
 # Configurar path ANTES de importar módulos locais
 file_path = Path(__file__).resolve()
@@ -14,11 +14,9 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 
-from sklearn.preprocessing import MinMaxScaler, LabelEncoder
 from keras.models import Model
 from keras.layers import Input, AdditiveAttention, LSTM, Dense, Dropout, Embedding, Flatten, Concatenate
 from keras.callbacks import EarlyStopping
-import argparse
 
 # utilitários
 from src.utils.helpers import ensure_dir, normalize_columns, add_lag_features
@@ -28,10 +26,9 @@ from src.models.evaluate import evaluate
 from src.utils.metrics import naive_market_smape
 
 
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' # Silencia avisos inúteis do TF
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-
-WINDOW = 7      # Janela de observação 14 dias
+WINDOW = 7      # Janela de observação 7 dias
 BATCH_SIZE = 128  # Tamanho do lote para otimização de memória no i3
 EPOCHS = 50      # Limite de iterações de treino
 PATIENCE = 10     # Tolerância para intPerrupção antecipada 
@@ -42,8 +39,9 @@ OUTPUT_BASE = ensure_dir(root / "Resultados" / "lstm")
 TARGET = 'quantity'
 FEATURES_BASE = [
      'onpromotion', 'unitvalue','holiday', 
-     'month', 'day_of_week', 'is_weekend'
+     'month', 'day_of_week', "day_sin", "day_cos", 'is_weekend'
 ]
+QTY_FEATURES = ["lag_1", "lag_7", "rolling_mean_3", "rolling_mean_7", "rolling_mean_14"]
 
 
 
@@ -59,48 +57,58 @@ def build_lstm_model(n_products, n_features, window):
     x = LSTM(64, return_sequences=True)(input_ts)
     x = Dropout(0.2)(x)
 
-    att = AdditiveAttention()([x,x])
+    x = AdditiveAttention()([x,x])
+    x = LSTM(32)(x)
 
-    x = LSTM(32)(att)
     emb = Embedding(input_dim=n_products, output_dim=16, name='prod_emb')(input_prod)
     emb = Flatten()(emb)    
 
     x = Concatenate()([x, emb])
     x = Dense(32, activation='relu')(x)
-    output = Dense(1, activation='linear')(x) # Softplus evita valores negativos
+    output = Dense(1, activation='softplus')(x) # Softplus evita valores negativos
     
     model = Model([input_ts, input_prod], output)
     
     
-    model.compile(optimizer = tf.keras.optimizers.Adam(0.001), loss='poisson')
+    model.compile(optimizer = tf.keras.optimizers.Adam(0.001), loss='mae')
 
     return model
 
 
 
 
-def create_sequences(df, window, features, target):
-    X, y = [], []
+def create_sequences(df, window, features, target, positive_weight=3.0):
+    X, y, w = [], [], []
     
     # Itera por produto para garantir isolamento de históricos
-    
-    X, y = [], []
     values_x = df[features].values
     values_y = df[target].values
 
     for i in range(len(df) - window):
+        target_next = values_y[i + window]
         X.append(values_x[i:i+window])
         y.append(values_y[i+window])
-            
-    return np.array(X), np.array(y)
+        w.append(positive_weight if target_next > 0 else 1.0)         
+    
+    return np.array(X), np.array(y), np.array(w)
 
+def _normalize_product_frame(g, market_max):
+    g = g.copy()
+    g[TARGET] = g[TARGET].clip(lower=0) / market_max
+    if "unitvalue" in g.columns:
+        g["unitvalue"] = g["unitvalue"].clip(lower=0)
 
+    g = add_lag_features(g, target=TARGET, lags=[1, 7, 14])
 
-def process_file_lstm(path, scenario=None):
+    for c in QTY_FEATURES:
+        if c in g.columns:
+            g[c] = g[c] / market_max
+    return g
+
+def process_file_lstm(path, market_max, scenario=None):
 
     # Carregamento e tipagem de data
-    df = pd.read_csv(path, parse_dates=['Date'])
-    df = df[df['Date'].dt.year == 2019]
+    df = pd.read_csv(path, parse_dates=['date'])
     df = normalize_columns(df)
     df = df.dropna(subset=[TARGET])
 
@@ -112,72 +120,51 @@ def process_file_lstm(path, scenario=None):
         except ImportError:
             # caso a importação falhe, ignoramos, mas avisamos
             print(f"Aviso: não foi possível aplicar cenário {scenario}")
+    
+    product_map = {pid: i for i, pid in enumerate(sorted(df["product_id"].unique()))}
+    df["product_idx"] = df["product_id"].map(product_map)
 
-    le = LabelEncoder()
-    df['product_id'] = le.fit_transform(df['product_id'])
-
-    df = df.sort_values(["product_id", "date"])
+    df = df.sort_values(["product_idx", "date"])
 
     results = []
 
-    n_unique_prods = df['product_id'].nunique()
+    for product_idx, g in df.groupby("product_idx"):
 
-    for product_id, g in df.groupby("product_id"):
+        g = g.copy().sort_values("date")
+        g = _normalize_product_frame(g, market_max)
+       
+        features = [c for c in FEATURES_BASE if c in g.columns] + \
+                [c for c in QTY_FEATURES if c in g.columns]
 
-        g = g.copy()
+        keep_cols = features + [TARGET]
+        g = g.dropna(subset=keep_cols)
 
         if len(g) < WINDOW * 6:
             continue
-        
-        g[TARGET] = np.log1p(g[TARGET].clip(lower=0))
-        g['unitvalue'] = np.log1p(g['unitvalue'].clip(lower=0))
-        
-        g = add_lag_features(g)
-        # only drop rows that are missing values in the features we actually use
-        features = FEATURES_BASE + ['lag_1','lag_7','rolling_mean_3','rolling_mean_7','rolling_mean_14']
-        keep = features + [TARGET]
-        g = g.dropna(subset=keep)
 
         n = len(g)
         train_end = int(n * 0.70)
-        val_end   = int(n * 0.85)
+        val_end = int(n * 0.85)
 
         train_df = g.iloc[:train_end].copy()
-        val_df   = g.iloc[train_end:val_end].copy()
-        test_df  = g.iloc[val_end:].copy()
+        val_df = g.iloc[train_end:val_end].copy()
+        test_df = g.iloc[val_end:].copy()
 
         # Cláusula de guarda para volume mínimo de treino
         if len(train_df) < WINDOW * 5 or len(test_df) < WINDOW:
             continue
+        X_train, y_train, w_train = create_sequences(train_df, WINDOW, features, TARGET, positive_weight=3.0)
+        X_val, y_val, _ = create_sequences(val_df, WINDOW, features, TARGET, positive_weight=3.0)
+        X_test, y_test, _ = create_sequences(test_df, WINDOW, features, TARGET, positive_weight=3.0)    
 
-        scaler_x = MinMaxScaler()
+        if len(X_train) == 0 or len(X_val) == 0 or len(X_test) == 0:
+            continue
 
-        # convert feature columns to float so they can hold scaled values
-        train_df[features] = train_df[features].astype(float)
-        val_df[features]   = val_df[features].astype(float)
-        test_df[features]  = test_df[features].astype(float)
+        train_id = np.full((len(X_train), 1), product_idx)
+        val_id   = np.full((len(X_val), 1), product_idx)
+        test_id  = np.full((len(X_test), 1), product_idx)
 
-        train_df[features] = scaler_x.fit_transform(train_df[features])
-        val_df[features]   = scaler_x.transform(val_df[features])
-        test_df[features]  = scaler_x.transform(test_df[features])
-    
-        X_train, y_train = create_sequences(
-            train_df, WINDOW, features, TARGET
-        )
-
-        X_val, y_val = create_sequences(
-            val_df, WINDOW, features, TARGET
-        )
-
-        X_test, y_test = create_sequences(
-            test_df, WINDOW, features, TARGET
-        )
-
-        train_id = np.full((len(X_train), 1), product_id)
-        val_id   = np.full((len(X_val), 1), product_id)
-        test_id  = np.full((len(X_test), 1), product_id)
-
-        model = build_lstm_model(n_unique_prods + 50, len(features),  WINDOW)
+        model = build_lstm_model(len(product_map) + 5, len(features),  WINDOW)
 
         # Configuração de parada antecipada monitorando perda na validação
         early_stop = EarlyStopping(
@@ -189,6 +176,7 @@ def process_file_lstm(path, scenario=None):
         model.fit(
             x=[X_train, train_id],
             y=y_train,
+            sample_weight=w_train,
             validation_data=([X_val, val_id], y_val), # Avaliação em dados não vistos para evitar overfitting
             epochs=EPOCHS,   # Ciclos totais de treinamento do modelo
             batch_size=BATCH_SIZE,  # Lotes de dados processados por vez 
@@ -198,17 +186,17 @@ def process_file_lstm(path, scenario=None):
         
 
         # Predição e retorno para escala original
-        preds = model.predict([X_test, test_id]).flatten()
+        preds = model.predict([X_test, test_id], verbose=0).flatten()
 
-        y_real = np.expm1(y_test)
-        p_real = np.expm1(preds)
+        y_real = y_test * market_max
+        p_real =  np.clip(preds, 0, None) * market_max
         
         metrics = evaluate(y_real, p_real)
 
         results.append({
             "model": "lstm",
             "arquivo": path.name,
-            "product_id": product_id,
+            "product_id": product_idx,
             "mae": metrics["MAE"],
             "rmse": metrics["RMSE"],
             "smape": metrics["sMAPE"]
@@ -222,6 +210,21 @@ def process_file_lstm(path, scenario=None):
     return pd.DataFrame(results)
 
 
+
+def compute_market_max(market_path):
+    max_vals = []
+    for csv_file in market_path.glob("cat*.csv"):
+        try:
+            df = pd.read_csv(csv_file)
+            df = normalize_columns(df)
+            if TARGET in df.columns:
+                max_vals.append(df[TARGET].max())
+        except Exception:
+            continue
+    market_max = np.nanmax(max_vals) if max_vals else np.nan
+    if not np.isfinite(market_max) or market_max <= 0:
+        market_max = 1.0
+    return float(market_max)
 
 
 def main():
@@ -239,12 +242,14 @@ def main():
             continue
 
         market_name = market_path.name
-        print(f"\nRodando LSTM em: {market_name}")
+        market_max = compute_market_max(market_path)
+
+        print(f"\nRodando LSTM em: {market_name} | max_global_quantity={market_max:.4f}")
 
         all_results = []
 
         for csv_file in market_path.glob("cat*.csv"):
-            df_res = process_file_lstm(csv_file, scenario=args.scenario)
+            df_res = process_file_lstm(csv_file, market_max=market_max, scenario=args.scenario)
 
             if not df_res.empty:
                 all_results.append(df_res)
@@ -260,7 +265,7 @@ def main():
 
             # imprime métrica final para que o orquestrador capture
             mean_smap = final['smape'].mean()
-            print(f"FINAL sMAPE: {mean_smap:.4f}")
+            print(f"FINAL sMAPE: {final['smape'].mean():.4f}")
         else:
             # calcula métrica de mercado como fallback
             market_smap = naive_market_smape(market_path)

@@ -6,13 +6,12 @@ import pandas as pd
 import numpy as np
 import argparse
 
-# Configurar path ANTES de importar módulos locais
 file_path = Path(__file__).resolve()
 root = file_path.parents[2]
 if str(root) not in sys.path:
     sys.path.append(str(root))
 
-from sklearn.preprocessing import LabelEncoder, MinMaxScaler
+from sklearn.preprocessing import LabelEncoder
 from xgboost import XGBRegressor
 
 # utilitários
@@ -30,13 +29,15 @@ except ImportError:
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 TARGET = 'quantity'
-# atributos fixos; usaremos ramificações para adicionar lags dinamicamente
+# atributos fixos;  ramificações para adicionar lags dinamicamente
 FEATURES_BASE = [
-    'onpromotion', 'unitvalue', 'holiday', 'month', 'day_of_week', 'is_weekend'
+    'onpromotion', 'unitvalue', 'holiday', 'month', 'day_of_week',"day_sin", "day_cos", 'is_weekend'
 ]
 FEATURES = FEATURES_BASE.copy()
 
-WINDOW = 14  # opcional, pode usar lags se desejar
+QTY_FEATURES = ["lag_1", "lag_7", "lag_14", "rolling_mean_3", "rolling_mean_7", "rolling_mean_14"]
+
+WINDOW = 7  
 
 INPUT_BASE = root / "Dados" / "preprocessed"
 OUTPUT_BASE = ensure_dir(root / "Resultados" / "xgb")
@@ -44,15 +45,26 @@ OUTPUT_BASE = ensure_dir(root / "Resultados" / "xgb")
 
 
 
+def compute_market_max(market_path):
+    max_vals = []
+    for csv_file in market_path.glob("cat*.csv"):
+        try:
+            df = pd.read_csv(csv_file)
+            df = normalize_columns(df)
+            if TARGET in df.columns:
+                max_vals.append(df[TARGET].max())
+        except Exception:
+            continue
+
+    market_max = np.nanmax(max_vals) if max_vals else np.nan
+    if not np.isfinite(market_max) or market_max <= 0:
+        market_max = 1.0
+    return float(market_max)
 
 
 
 def run_xgb(train_df, val_df, test_df, features):
-    """
-    Treina XGBoost e retorna previsões e métricas.
 
-    Assume que o alvo já foi transformado (log1p) externamente.
-    """
     # alvo já preparado nas funções chamadoras
     train_y = train_df[TARGET].values
     val_y = val_df[TARGET].values
@@ -62,6 +74,9 @@ def run_xgb(train_df, val_df, test_df, features):
     X_train = train_df[features].values
     X_val = val_df[features].values
     X_test = test_df[features].values
+
+    # mais peso para alvos positivos em séries esparsas
+    sample_weight = np.where(train_y > 0, 3.0, 1.0)
 
     model = XGBRegressor(
         n_estimators=500,
@@ -74,26 +89,22 @@ def run_xgb(train_df, val_df, test_df, features):
     )
 
     model.fit(
-        X_train, train_y,
+        X_train,
+        train_y,
+        sample_weight=sample_weight,
         eval_set=[(X_val, val_y)],
         early_stopping_rounds=20,
         verbose=False
     )
 
-    preds = model.predict(X_test)
-    # garantir flatten
-    if preds.ndim == 1:
-        preds = preds.flatten()
-    y_test_inv = np.expm1(test_y)
-    preds_inv = np.expm1(preds)
-
-    metrics = evaluate(y_test_inv, preds_inv)
-
-    return preds_inv, metrics
+    preds = model.predict(X_test).flatten()
 
 
-def process_file(csv_file, scenario=None):
-    df = pd.read_csv(csv_file, parse_dates=['Date'])
+    return preds, test_y
+
+
+def process_file(csv_file,  market_max, scenario=None):
+    df = pd.read_csv(csv_file, parse_dates=['date'])
     df = normalize_columns(df)
     df = df.dropna(subset=[TARGET])
 
@@ -106,8 +117,7 @@ def process_file(csv_file, scenario=None):
     le = LabelEncoder()
     df['product_id_encoded'] = le.fit_transform(df['product_id'])
 
-    df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
-    df = df.sort_values(['product_id', 'date'])
+    df = df.sort_values(["product_id_encoded", "date"])
 
     results = []
 
@@ -115,12 +125,21 @@ def process_file(csv_file, scenario=None):
         g = g.copy()
         # adiciona lags antes de definir a lista de features usada pelo modelo
         # create lags then only drop entries missing target or predictor features
+        g[TARGET] = g[TARGET].clip(lower=0) / market_max
+        if "unitvalue" in g.columns:
+            g["unitvalue"] = g["unitvalue"].clip(lower=0)
         g = add_lag_features(g, TARGET, lags=[1, 7, 14])
-        feat_cols = ['lag_1','lag_7','lag_14'] + [TARGET]
-        g = g.dropna(subset=feat_cols)
-        features = FEATURES_BASE + ['lag_1', 'lag_7', 'lag_14']
+       
+        for c in QTY_FEATURES:
+            if c in g.columns:
+                g[c] = g[c] / market_max
+
+        features = [c for c in FEATURES_BASE if c in g.columns] + [c for c in QTY_FEATURES if c in g.columns]
+        g = g.dropna(subset=features + [TARGET])
 
         n = len(g)
+        if n <= WINDOW:
+            continue
         train_end = int(n * 0.70)
         val_end = int(n * 0.85)
 
@@ -130,40 +149,24 @@ def process_file(csv_file, scenario=None):
 
         if len(train_df) < 20 or len(val_df) < 5 or len(test_df) < 5:
             continue
-
-        # transformação segura usando .loc para evitar SettingWithCopyWarning
-        for subset in (train_df, val_df, test_df):
-            subset.loc[:, TARGET] = np.log1p(subset[TARGET].clip(lower=0))
-
-        # Escala os features com MinMaxScaler ajustado apenas no conjunto de treino
-        scaler = MinMaxScaler()
-        # garantir tipo numérico antes do fit/transform
-        # ensure numeric type before scaling by assigning directly
-        train_df[features] = train_df[features].astype(float)
-        val_df[features]   = val_df[features].astype(float)
-        test_df[features]  = test_df[features].astype(float)
-        scaler.fit(train_df.loc[:, features])
-        train_df.loc[:, features] = scaler.transform(train_df.loc[:, features])
-        val_df.loc[:, features] = scaler.transform(val_df.loc[:, features])
-        test_df.loc[:, features] = scaler.transform(test_df.loc[:, features])
-
         try:
-            preds, metrics = run_xgb(train_df, val_df, test_df, features)
-            # garantia contra array 2D/1D retornado pelo XGBoost
-            if preds.ndim == 1:
-                preds = preds.flatten()
+            preds, y_true = run_xgb(train_df, val_df, test_df, features)
 
+            y_true_real = y_true * market_max
+            preds_real = np.clip(preds, 0, None) * market_max
+            metrics = evaluate(y_true_real, preds_real)
             original_id = le.inverse_transform([pid_encoded])[0]
 
-            results.append({
-                "model": "xgboost",
-                "arquivo": csv_file.name,
-                "product_id": original_id,
-                "mae": metrics["MAE"],
-                "rmse": metrics["RMSE"],
-                "smape": metrics["sMAPE"]
-            })
-
+            results.append(
+                {
+                    "model": "xgboost",
+                    "arquivo": csv_file.name,
+                    "product_id": original_id,
+                    "mae": metrics["MAE"],
+                    "rmse": metrics["RMSE"],
+                    "smape": metrics["sMAPE"],
+                }
+            )
         except Exception as e:
             print(f"Erro no produto {pid_encoded}: {e}")
             continue
@@ -187,12 +190,13 @@ def main():
             continue
 
         market_name = market_path.name
-        print(f"\nRodando XGBoost em: {market_name}")
+        market_max = compute_market_max(market_path)
+        print(f"\nRodando XGBoost em: {market_name} | max_global_quantity={market_max:.4f}")
 
         all_results = []
 
         for csv_file in market_path.glob("cat*.csv"):
-            df_res = process_file(csv_file, scenario=args.scenario)
+            df_res = process_file(csv_file, market_max=market_max, scenario=args.scenario)
             if not df_res.empty:
                 all_results.append(df_res)
 
@@ -203,8 +207,7 @@ def main():
             final.to_csv(out_file, index=False)
             print(f"  Resultados salvos em {out_file}")
 
-            mean_smap = final['smape'].mean()
-            print(f"FINAL sMAPE: {mean_smap:.4f}")
+            print(f"FINAL sMAPE: {final['smape'].mean():.4f}")
         else:
             market_smap = naive_market_smape(market_path)
             print(f"FALLBACK market sMAPE: {market_smap:.4f}")

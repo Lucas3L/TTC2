@@ -1,17 +1,17 @@
 import numpy as np
 
 import pandas as pd
-from sklearn.model_selection import train_test_split
 
-def create_sequences_by_product(df, features, target, window):
+def create_sequences_by_product(df, features, target, window , positive_weight=3.0):
     # Identifica dinamicamente a coluna de data para evitar erros de case sensitivity
     date_col = "Date" if "Date" in df.columns else "date"
 
     X_sequences = []
     y_sequences = []
+    sample_weights = []
 
     # Isolamento por ID de produto: crucial para evitar que séries temporais distintas se misturem
-    for product_id, group in df.groupby("product_id"):
+    for _, group in df.groupby("product_id"):
         # Ordenação cronológica obrigatória para garantir que a janela reflita a sequência real
         group = group.sort_values(date_col)
 
@@ -25,13 +25,13 @@ def create_sequences_by_product(df, features, target, window):
 
         # Algoritmo de janela deslizante para gerar amostras sequenciais
         for i in range(len(X) - window):
-            # X_seq recebe o bloco de dias anteriores
+            target_next = y[i + window]
             X_sequences.append(X[i:i+window])
             # y_seq recebe o valor do dia imediatamente posterior
             y_sequences.append(y[i+window])
-
+            sample_weights.append(positive_weight if target_next > 0 else 1.0)
     # Conversão final para o formato de tensor 3D exigido por modelos LSTM e GRU
-    return np.array(X_sequences), np.array(y_sequences)
+    return np.array(X_sequences), np.array(y_sequences), np.array(sample_weights)
 
 def add_price_segments(df):
     # Segmentação por Preço (Quartis)
@@ -48,18 +48,20 @@ def build_features(
     df,
     target_col="quantity",
     date_col="Date",
-    window=7
+    window=7,
+    positive_weight=3.0
 ):
     features = [
         col for col in df.columns
         if col not in [target_col, date_col, "product_id"]
     ]
 
-    X, y = create_sequences_by_product(
+    X, y, w = create_sequences_by_product(
         df=df,
         features=features,
         target=target_col,
-        window=window
+        window=window,
+        positive_weight=positive_weight,
     )
 
-    return X, y
+    return X, y, w

@@ -107,7 +107,7 @@ def create_sequences(data, features, target, window ):
 
 def process_file(csv_file, scenario=None):
     # carrega e aplica cenário caso exista
-    df = pd.read_csv(csv_file, parse_dates=['Date'])
+    df = pd.read_csv(csv_file, parse_dates=['date'])
     df = normalize_columns(df)
     # elimina linhas com alvo ausente antes de qualquer transformação
     df = df.dropna(subset=[TARGET])
@@ -153,11 +153,6 @@ def process_file(csv_file, scenario=None):
     if len(train_df) < 1000 or len(test_df) < 300:
         return pd.DataFrame()
 
-    # transformação dos alvos e features
-    for subset in (train_df, val_df, test_df):
-        subset[TARGET] = np.log1p(subset[TARGET].clip(lower=0))
-        subset['unitvalue'] = np.log1p(subset['unitvalue'].clip(lower=0))
-
     scaler_x = MinMaxScaler()
     # convert feature columns to float then scale
     features = FEATURES_BASE + ['lag_1','lag_7','rolling_mean_3','rolling_mean_7','rolling_mean_14']
@@ -169,11 +164,6 @@ def process_file(csv_file, scenario=None):
     val_df[features]   = scaler_x.transform(val_df[features])
     test_df[features]  = scaler_x.transform(test_df[features])
     
-    scaler_y = MinMaxScaler()
-    train_df[[TARGET]] = scaler_y.fit_transform(train_df[[TARGET]])
-    val_df[[TARGET]] = scaler_y.transform(val_df[[TARGET]])
-    test_df[[TARGET]] = scaler_y.transform(test_df[[TARGET]])
-
     # sequências vetorizadas para todos os produtos
     X_train, y_train, id_train = create_sequences(train_df, features, TARGET, WINDOW)
     X_val, y_val, id_val = create_sequences(val_df, features, TARGET, WINDOW)
@@ -185,9 +175,13 @@ def process_file(csv_file, scenario=None):
 
     preds = run_gru(X_train, y_train, id_train, X_val, y_val, id_val, X_test, y_test, id_test)
 
+    for subset in (train_df, val_df, test_df):
+        subset[TARGET] = subset[TARGET].clip(lower=0).astype(float)
+
+    y_test_inv = y_test
+    preds_inv = np.clip(preds, 0, None)
+
     # decodifica métricas
-    y_test_inv = np.expm1(scaler_y.inverse_transform(y_test.reshape(-1,1)).flatten())
-    preds_inv = np.expm1(scaler_y.inverse_transform(preds.reshape(-1,1)).flatten())
     metrics = evaluate(y_test_inv, preds_inv)
 
     # apenas retorna as métricas globais para o arquivo
