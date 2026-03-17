@@ -30,24 +30,9 @@ WINDOW = 7  # opcional, para gerar lags
 
 
 
-# Forecast simples: usa último valor do lag mais recente
+# Forecast simples: usa último valor conhecido (lag_1)
 def naive_lag_forecast(df, feature="lag_1"):
-    return df[feature]
-
-def zero_aware_forecast(row):
-    zero_run = row.get("zero_run_length", 0)
-    occ_rate = row.get("occurrence_rate_14", 1.0)
-    rolling_mean = row.get("rolling_mean_7", 0)
-    pos_mean = row.get("positive_mean_7", 0)
-
-    # regra intermitente
-    if zero_run >= 3 and occ_rate <= 0.4:
-        return 0.0
-
-    if pos_mean > 0:
-        return pos_mean
-
-    return rolling_mean
+    return df[feature].fillna(0)
 
 # Processa cada arquivo
 def process_file(csv_file):
@@ -59,48 +44,25 @@ def process_file(csv_file):
 
     for pid, g in df.groupby("product_id"):
         g = g.copy().sort_values("date")
-        g["zero_run_length"] = (
-            (g[TARGET] == 0)
-            .astype(int)
-            .groupby((g[TARGET] != 0).cumsum())
-            .cumsum()
-        )
-
-        g["occurrence_rate_14"] = (
-            (g[TARGET] > 0)
-            .rolling(14, min_periods=1)
-            .mean()
-        )
-
-        g["positive_mean_7"] = (
-            g[TARGET]
-            .where(g[TARGET] > 0)
-            .rolling(7, min_periods=1)
-            .mean()
-        )
-
-        g["rolling_mean_7"] = (
-            g[TARGET]
-            .rolling(7, min_periods=1)
-            .mean()
-        )
+        
+        # Adicionar lags ANTES da divisão treino/teste
         g = add_lag_features(g, TARGET, lags=[1, 7, 14])
-        # baseline only uses lag columns and target, ignore others when dropping
         feat_cols = ['lag_1','lag_7','lag_14', TARGET]
         g = g.dropna(subset=feat_cols)
         
         n = len(g)
-
         if n < 20:
             continue
 
+        # Dividir em treino/teste (80% teste como nos outros modelos)
         split_idx = int(n * 0.8)
-        test_df  = g.iloc[split_idx:].copy()
+        test_df = g.iloc[split_idx:].copy()
         
         if len(test_df) < 3:
             continue
 
-        y_pred = test_df.apply(zero_aware_forecast, axis=1)
+        # Baseline simples: usar lag_1 como previsão
+        y_pred = test_df['lag_1'].fillna(0)
         y_true = test_df[TARGET]
         metrics = evaluate(y_true, y_pred)
 

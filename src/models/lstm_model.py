@@ -233,8 +233,14 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--scenario", type=str, default=None,
                         help="Cenário a ser aplicado (volume, price, kmeans)")
+    parser.add_argument("--epochs", type=int, default=50,
+                        help="Número de épocas de treinamento")
     args = parser.parse_args()
     set_global_seed(args.seed)
+
+    # Sobrescrever EPOCHS se especificado
+    global EPOCHS
+    EPOCHS = args.epochs
 
     # itera apenas sobre o cenário solicitado; o loop de cenários foi movido para main.py
     for market_path in INPUT_BASE.iterdir():

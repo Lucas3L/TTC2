@@ -2,7 +2,6 @@ from pathlib import Path
 import pandas as pd
 from validators import (corrigir_datas_temporais,
                         corrigir_valores_temporais,
-                        gerar_relatorio_intermitencia,
                         tratar_outliers_iqr_por_produto,)
 import numpy as np
 
@@ -71,7 +70,7 @@ for market_path in INPUT_BASE.iterdir():
 
         # Salvamento do arquivo csv e sinalização o salvamento
         df.to_csv(output_file, index=False)
-        print(f"    ✔ Salvo em {output_file}")
+        print(f"    [OK] Salvo em {output_file}")
 
         # Salva as anomalias encontradas em um arquivo separado
         if anomalias:

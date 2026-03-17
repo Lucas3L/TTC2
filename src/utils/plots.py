@@ -1,11 +1,11 @@
-
-from pathlib import Path
 from __future__ import annotations
-
+from pathlib import Path
 import argparse
 import csv
 from collections import defaultdict
-from pathlib import Path
+import os
+import datetime
+import pandas as pd
 
 
 def _get_plt():
@@ -24,6 +24,7 @@ DEFAULT_OUTPUT_DIR = Path("Resultados/plots")
 
 # Definição dos caminhos para leitura dos dados consolidados e salvamento das imagens
 RESULTS_FILE = Path("Resultados/consolidated_results.csv")
+
 OUTPUT_DIR = Path("Resultados/plots")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True) # Cria a pasta de gráficos caso não exista
 COLUMN_MAP = {
@@ -32,7 +33,7 @@ COLUMN_MAP = {
     "smape": ["smape", "smape_test", "SMAPE", "sMAPE"],
     "model": ["model", "modelo"],
     "category": ["category", "cat", "categoria"],
-    "product": ["product", "produto", "sku"],
+    "product": ["product", "produto", "sku"]
 }
 
 def _mean(values):
@@ -235,32 +236,78 @@ def print_technical_summary(rows: list[dict], col: dict[str, str], output_dir: P
     (output_dir / "technical_summary.txt").write_text(text, encoding="utf-8")
 
 
-def generate_all_plots(results_file: Path, output_dir: Path) -> None:
-    rows, col = load_results(results_file)
-
+# --- NOVA FUNÇÃO: Gera gráficos para todos os CSVs de resultados encontrados em 'Resultados/' ---
+def generate_plots_for_all_csvs(resultados_dir=Path("Resultados"), output_dir=Path("Resultados/plots")):
     plt = _get_plt()
-    if plt is not None:
-        plot_metric_by_model(rows, col["model"], col["mae"], "mae", output_dir, plt)
-        plot_metric_by_model(rows, col["model"], col["rmse"], "rmse", output_dir, plt)
-        plot_metric_by_model(rows, col["model"], col["smape"], "smape", output_dir, plt)
-        plot_smape_distribution(rows, col["smape"], output_dir, plt)
-        plot_mae_vs_smape(rows, col["mae"], col["smape"], output_dir, plt)
-        if "category" in col:
-            plot_smape_by_category(rows, col["category"], col["smape"], output_dir, plt)
-    else:
-        print("Aviso: matplotlib não disponível. Gráficos serão pulados, mas o resumo técnico será gerado.")
-
-    print_technical_summary(rows, col, output_dir)
-    print(f"\nSaídas salvas em: {output_dir}")
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Gera gráficos e diagnóstico técnico a partir de CSV de resultados.")
-    parser.add_argument("--results-file", type=Path, default=DEFAULT_RESULTS_FILE, help="CSV com resultados consolidados")
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Diretório de saída dos gráficos")
-    return parser.parse_args()
-
+    if plt is None:
+        print("matplotlib não instalado. Instale para gerar gráficos.")
+        return
+    # Cria subpasta por data/hora de execução
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    session_dir = output_dir / now_str
+    session_dir.mkdir(parents=True, exist_ok=True)
+    for subdir, _, files in os.walk(resultados_dir):
+        if 'plots' in subdir:
+            continue
+        for file in files:
+            if file.endswith('.csv'):
+                csv_path = Path(subdir) / file
+                # Identifica o modelo pelo nome da subpasta (ex: 'lstm', 'gru', etc.)
+                parts = Path(subdir).parts
+                model_name = next((p for p in parts if p.lower() in ['lstm','gru','xgb','baseline_zero_aware']), 'outros')
+                model_dir = session_dir / model_name
+                model_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    df = pd.read_csv(csv_path)
+                except Exception as e:
+                    print(f"[!] Falha ao ler {csv_path}: {e}")
+                    continue
+                # Filtra apenas linhas da data/hora atual do arquivo, se desejar separar por data do resultado
+                # Exemplo: cria subpastas por data do timestamp da linha
+                if 'timestamp' in df.columns:
+                    df['date_only'] = pd.to_datetime(df['timestamp']).dt.date.astype(str)
+                    for date_str, group in df.groupby('date_only'):
+                        date_dir = model_dir / date_str
+                        date_dir.mkdir(parents=True, exist_ok=True)
+                        for metric in ['mae', 'rmse', 'smape']:
+                            metric_col = None
+                            for col in COLUMN_MAP[metric]:
+                                if col in group.columns:
+                                    metric_col = col
+                                    break
+                            if metric_col is None:
+                                continue
+                            plt.figure(figsize=(7,4))
+                            plt.title(f"{file} - {metric_col} - {date_str}")
+                            plt.hist(group[metric_col].dropna(), bins=20, color='skyblue', edgecolor='black')
+                            plt.xlabel(metric_col)
+                            plt.ylabel('Frequência')
+                            out_name = f"{file.replace('.csv','')}_{metric_col}"
+                            plt.tight_layout()
+                            plt.savefig(date_dir / f"{out_name}.png", dpi=300)
+                            plt.close()
+                            print(f"[+] Gráfico gerado: {date_dir / f'{out_name}.png'}")
+                    continue  # já processou por data, não faz o geral
+                else:
+                    for metric in ['mae', 'rmse', 'smape']:
+                        metric_col = None
+                        for col in COLUMN_MAP[metric]:
+                            if col in df.columns:
+                                metric_col = col
+                                break
+                        if metric_col is None:
+                            continue
+                        plt.figure(figsize=(7,4))
+                        plt.title(f"{file} - {metric_col}")
+                        plt.hist(df[metric_col].dropna(), bins=20, color='skyblue', edgecolor='black')
+                        plt.xlabel(metric_col)
+                        plt.ylabel('Frequência')
+                        out_name = f"{file.replace('.csv','')}_{metric_col}"
+                        plt.tight_layout()
+                        plt.savefig(model_dir / f"{out_name}.png", dpi=300)
+                        plt.close()
+                        print(f"[+] Gráfico gerado: {model_dir / f'{out_name}.png'}")
 
 if __name__ == "__main__":
-    args = parse_args()
-    generate_all_plots(args.results_file, args.output_dir)
+    # Apenas a função automática de busca de CSVs e geração de gráficos
+    generate_plots_for_all_csvs()

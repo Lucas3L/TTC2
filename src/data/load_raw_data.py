@@ -12,12 +12,7 @@ OUTPUT_BASE = Path("Dados/processed")
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Converte nomes de colunas para snake_case estável.
 
-    - lower case
-    - espaços -> _
-    - remove caracteres não alfanuméricos exceto _
-    """
     cols = (
         df.columns
         .astype(str)
@@ -139,7 +134,7 @@ for market_path in BASE_PATH.iterdir():
             output_file = market_output / f"cat{category_code}.csv"
             df_categoria.to_csv(output_file, index=False)
 
-            print(f"    ✔ Arquivo salvo: {output_file}")
+            print(f"    [OK] Arquivo salvo: {output_file}")
 
             # Limpeza de memória imediata após salvar arquivo grande
             del df_categoria

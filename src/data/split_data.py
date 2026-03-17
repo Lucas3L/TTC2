@@ -38,8 +38,8 @@ for market_path in INPUT_BASE.iterdir():
     for csv_file in market_path.glob("cat*.csv"):
         print(f"  Processando {csv_file.name}")
 
-        # Realiza a leitura do arquivo e aceita variações de case na coluna Date
-        df = pd.read_csv(csv_file, parse_dates=["Date"], dayfirst=True)
+        # Realiza a leitura do arquivo
+        df = pd.read_csv(csv_file)
 
         # Normaliza nomes de colunas para snake_case
         df.columns = (
@@ -48,6 +48,10 @@ for market_path in INPUT_BASE.iterdir():
             .str.lower()
             .str.replace(' ', '_')
         )
+        
+        # Converte coluna date para datetime
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], format='ISO8601', errors='coerce')
 
         if 'date' not in df.columns:
             print(f"    Ignorando {csv_file.name}: coluna 'date' ausente")

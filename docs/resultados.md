@@ -50,3 +50,5 @@ Apesar dos bons resultados, algumas limitações foram observadas:
 - Variação de desempenho entre produtos com pouca informação histórica
 
 Esses fatores indicam oportunidades para melhorias futuras.
+
+---

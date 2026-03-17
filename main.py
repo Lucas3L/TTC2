@@ -171,5 +171,13 @@ def main():
     print(f"Logs de erro (se houver): {ERROR_LOG}")
     print(f"Arquivos de resultados gerados em: {OUTPUT_DIR}")
 
+    # Geração automática dos gráficos ao final do pipeline
+    try:
+        print("\nGerando gráficos dos resultados...")
+        subprocess.run(["python", str(SRC_DIR / "utils" / "plots.py")], check=True)
+        print("Gráficos salvos em Resultados/plots/")
+    except Exception as e:
+        print(f"[!] Falha ao gerar gráficos automaticamente: {e}")
+
 if __name__ == "__main__":
     main()

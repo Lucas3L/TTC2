@@ -38,6 +38,45 @@ def corrigir_datas_temporais(df, max_faltantes=2, anomalias=None):
     return df, anomalias
 
 
+# --- Tratamento de Outliers usando IQR por produto ---
+def tratar_outliers_iqr_por_produto(df, coluna, iqr_factor=1.5, anomalias=None):
+    """Remove outliers usando IQR por produto.
+    
+    Retorna (df, anomalias) para compatibilidade com o pipeline.
+    """
+    if anomalias is None:
+        anomalias = []
+    
+    df = df.copy()
+    col = coluna.lower()
+    
+    # cria coluna observation se não existir
+    if "observation" not in df.columns:
+        df["observation"] = "ok"
+    
+    for product_id, g in df.groupby("product_id"):
+        Q1 = g[col].quantile(0.25)
+        Q3 = g[col].quantile(0.75)
+        IQR = Q3 - Q1
+        
+        lower_bound = Q1 - iqr_factor * IQR
+        upper_bound = Q3 + iqr_factor * IQR
+        
+        # identifica outliers
+        outlier_mask = (g[col] < lower_bound) | (g[col] > upper_bound)
+        
+        if outlier_mask.any():
+            outliers = g[outlier_mask].copy()
+            outliers["observation"] = f"{col}_outlier_removed"
+            anomalias.extend(outliers.to_dict("records"))
+            
+            # substitui outliers pela mediana do produto
+            median = g[col].median()
+            df.loc[g[outlier_mask].index, col] = median
+            df.loc[g[outlier_mask].index, "observation"] = f"{col}_median_imputed"
+    
+    return df, anomalias
+
 
 # --- Correção vetorizada de valores temporais ---
 def corrigir_valores_temporais(df, coluna, window=7, anomalias=None):
