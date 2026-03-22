@@ -1,6 +1,13 @@
 import pandas as pd
 import numpy as np
 
+# Heurística contextual para zeros de quantidade
+ZERO_CONTEXT_WINDOW = 5
+ZERO_CONTEXT_MIN_PERIODS = 3
+ZERO_CONTEXT_THRESHOLD = 5.0
+IGNORE_SUNDAY_ZERO = True
+HOLIDAY_COLUMN = "holiday"
+
 
 # --- Correção de datas temporais (usa 'date') ---
 def corrigir_datas_temporais(df, max_faltantes=2, anomalias=None):
@@ -97,12 +104,49 @@ def corrigir_valores_temporais(df, coluna, window=7, anomalias=None):
         df["observation"] = "ok"
 
     # máscara de inválidos
-    invalid_mask = df[col].isna() | (df[col] <= 0)
+    if col == "quantity":
+        qty = df[col].astype(float)
 
-    # média móvel por produto ignorando valores <= 0
+        local_mean_non_zero = (
+            df.groupby("product_id")[col]
+            .transform(
+                lambda x: x.where(x != 0).rolling(
+                    window=ZERO_CONTEXT_WINDOW,
+                    min_periods=ZERO_CONTEXT_MIN_PERIODS,
+                    center=True,
+                ).mean()
+            )
+        )
+
+        if "date" in df.columns and IGNORE_SUNDAY_ZERO:
+            sunday_closed_mask = df["date"].dt.dayofweek == 6
+        else:
+            sunday_closed_mask = pd.Series(False, index=df.index)
+
+        holiday_closed_mask = (
+            df[HOLIDAY_COLUMN].fillna(0).astype(float).gt(0)
+            if HOLIDAY_COLUMN in df.columns
+            else pd.Series(False, index=df.index)
+        )
+        closure_mask = sunday_closed_mask | holiday_closed_mask
+
+        suspicious_zero_mask = (
+            qty.eq(0)
+            & local_mean_non_zero.notna()
+            & (local_mean_non_zero >= ZERO_CONTEXT_THRESHOLD)
+            & (~closure_mask)
+        )
+
+        invalid_mask = qty.isna() | (qty < 0) | suspicious_zero_mask
+        valid_series = qty.where(~invalid_mask)
+    else:
+        invalid_mask = df[col].isna() | (df[col] <= 0)
+        valid_series = df[col].where(df[col] > 0)
+
+    # média móvel por produto para imputação de pontos inválidos
     rolling_mean = (
-        df.groupby("product_id")[col]
-        .transform(lambda x: x.where(x > 0).rolling(window=window, center=True, min_periods=1).mean())
+        valid_series.groupby(df["product_id"])
+        .transform(lambda x: x.rolling(window=window, center=True, min_periods=1).mean())
     )
 
     # aplica correção vetorizada

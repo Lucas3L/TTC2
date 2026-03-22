@@ -7,16 +7,15 @@ import numpy as np
 import argparse
 
 # Configurar path ANTES de importar módulos locais
-file_path = Path(__file__).resolve()
-root = file_path.parents[2]
-if str(root) not in sys.path:
-    sys.path.append(str(root))
+from src.utils.project_paths import add_project_root_to_sys_path
+root = add_project_root_to_sys_path(__file__)
 
 # imports utilitários
 from src.utils.reproducibility import set_global_seed
 from src.utils.helpers import ensure_dir, normalize_columns, add_lag_features
 from src.utils.metrics import naive_market_smape
 from src.models.evaluate import evaluate
+from src.config.model_params import COMMON_MODEL_PARAMS
 
 # Caminhos base usando raiz do projeto para evitar dependência de cwd
 INPUT_BASE = root / "Dados" / "preprocessed"
@@ -25,43 +24,46 @@ ensure_dir(OUTPUT_BASE)
 
 TARGET = "quantity"
 
-WINDOW = 7  # opcional, para gerar lags
-
-
-
-
-# Forecast simples: usa último valor conhecido (lag_1)
+WINDOW = COMMON_MODEL_PARAMS["window_size"]
+TRAIN_RATIO = COMMON_MODEL_PARAMS["train_ratio"]
+VAL_RATIO = COMMON_MODEL_PARAMS["val_ratio"]
+LAGS = COMMON_MODEL_PARAMS["lags"]
+ROLLING_WINDOWS = COMMON_MODEL_PARAMS["rolling_windows"]
+ROLLING_FEATURES = [f"rolling_mean_{w}" for w in ROLLING_WINDOWS]
 def naive_lag_forecast(df, feature="lag_1"):
     return df[feature].fillna(0)
 
-# Processa cada arquivo
-def process_file(csv_file):
+def process_file(csv_file, scenario=None, date_from=None, date_to=None):
     df = pd.read_csv(csv_file, parse_dates=["date"])
     df = normalize_columns(df)
     df = df.dropna(subset=[TARGET])
+    if date_from is not None:
+        df = df[df["date"] >= pd.to_datetime(date_from)]
+    if date_to is not None:
+        df = df[df["date"] <= pd.to_datetime(date_to)]
     df = df.sort_values(["product_id", "date"])
     results = []
+    pred_rows = []
 
     for pid, g in df.groupby("product_id"):
         g = g.copy().sort_values("date")
         
-        # Adicionar lags ANTES da divisão treino/teste
-        g = add_lag_features(g, TARGET, lags=[1, 7, 14])
-        feat_cols = ['lag_1','lag_7','lag_14', TARGET]
+        g = add_lag_features(g, TARGET, lags=LAGS, rolling_windows=ROLLING_WINDOWS)
+        lag_cols = [f"lag_{lag}" for lag in LAGS]
+        feat_cols = lag_cols + ROLLING_FEATURES + [TARGET]
         g = g.dropna(subset=feat_cols)
         
         n = len(g)
         if n < 20:
             continue
 
-        # Dividir em treino/teste (80% teste como nos outros modelos)
-        split_idx = int(n * 0.8)
-        test_df = g.iloc[split_idx:].copy()
+        train_end = int(n * TRAIN_RATIO)
+        val_end = int(n * (TRAIN_RATIO + VAL_RATIO))
+        test_df = g.iloc[val_end:].copy()
         
         if len(test_df) < 3:
             continue
 
-        # Baseline simples: usar lag_1 como previsão
         y_pred = test_df['lag_1'].fillna(0)
         y_true = test_df[TARGET]
         metrics = evaluate(y_true, y_pred)
@@ -74,10 +76,20 @@ def process_file(csv_file):
             "rmse": metrics["RMSE"],
             "smape": metrics["sMAPE"]
         })
+        for dt, y_t, y_p in zip(test_df["date"], y_true, y_pred):
+            pred_rows.append({
+                "model": "baseline_zero_aware",
+                "arquivo": csv_file.name,
+                "product_id": pid,
+                "date": dt,
+                "y_true": float(y_t),
+                "y_pred": float(y_p),
+                "scenario": scenario
+            })
 
         gc.collect()
 
-    return pd.DataFrame(results)
+    return pd.DataFrame(results), pd.DataFrame(pred_rows)
 
 # Main
 def main():
@@ -85,6 +97,10 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--scenario", type=str, default=None,
                         help="Cenário a ser aplicado (volume, price, kmeans)")
+    parser.add_argument("--date-from", type=str, default=None,
+                        help="Data inicial (YYYY-MM-DD) para filtrar histórico")
+    parser.add_argument("--date-to", type=str, default=None,
+                        help="Data final (YYYY-MM-DD) para filtrar histórico")
     args = parser.parse_args()
     
     set_global_seed(args.seed)
@@ -97,16 +113,26 @@ def main():
         print(f"\nRodando baseline_zero_aware em: {market_name}")
 
         all_results = []
+        all_predictions = []
         for csv_file in market_path.glob("cat*.csv"):
-            df_res = process_file(csv_file)
+            df_res, df_pred = process_file(
+                csv_file, scenario=args.scenario,
+                date_from=args.date_from, date_to=args.date_to
+            )
             if not df_res.empty:
                 all_results.append(df_res)
+            if not df_pred.empty:
+                all_predictions.append(df_pred)
 
         if all_results:
             final = pd.concat(all_results, ignore_index=True)
             out_file = OUTPUT_BASE / f"{market_name}_baseline_zero_aware.csv"
             final.to_csv(out_file, index=False)
             print(f"  Resultados salvos em {out_file}")
+            if all_predictions:
+                pred_file = OUTPUT_BASE / f"{market_name}_baseline_zero_aware_predictions.csv"
+                pd.concat(all_predictions, ignore_index=True).to_csv(pred_file, index=False)
+                print(f"  Curva real vs predito salva em {pred_file}")
             
             mean_smape = final['smape'].mean()
             print(f"FINAL sMAPE: {mean_smape:.4f}")

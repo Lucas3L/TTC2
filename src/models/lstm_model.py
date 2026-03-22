@@ -1,14 +1,10 @@
-from pathlib import Path
-import sys
 import gc
 import os
 import argparse
 
 # Configurar path ANTES de importar módulos locais
-file_path = Path(__file__).resolve()
-root = file_path.parents[2]
-if str(root) not in sys.path:
-    sys.path.append(str(root))
+from src.utils.project_paths import add_project_root_to_sys_path
+root = add_project_root_to_sys_path(__file__)
 
 import numpy as np
 import pandas as pd
@@ -24,24 +20,26 @@ from src.utils.reproducibility import set_global_seed
 from src.models.evaluate import evaluate
 # fallback metric across market when individual results missing
 from src.utils.metrics import naive_market_smape
+from src.config.model_params import COMMON_MODEL_PARAMS
 
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-WINDOW = 7      # Janela de observação 7 dias
-BATCH_SIZE = 128  # Tamanho do lote para otimização de memória no i3
-EPOCHS = 50      # Limite de iterações de treino
-PATIENCE = 10     # Tolerância para intPerrupção antecipada 
+WINDOW = COMMON_MODEL_PARAMS["window_size"]      # Janela de observação
+BATCH_SIZE = COMMON_MODEL_PARAMS["training_by_model"]["lstm"]["batch_size"]
+EPOCHS = COMMON_MODEL_PARAMS["training_by_model"]["lstm"]["epochs"]
+PATIENCE = COMMON_MODEL_PARAMS["training_by_model"]["lstm"]["patience"]
+TRAIN_RATIO = COMMON_MODEL_PARAMS["train_ratio"]
+VAL_RATIO = COMMON_MODEL_PARAMS["val_ratio"]
 
 INPUT_BASE = root / "Dados" / "preprocessed"
 OUTPUT_BASE = ensure_dir(root / "Resultados" / "lstm")
 
 TARGET = 'quantity'
-FEATURES_BASE = [
-     'onpromotion', 'unitvalue','holiday', 
-     'month', 'day_of_week', "day_sin", "day_cos", 'is_weekend'
-]
-QTY_FEATURES = ["lag_1", "lag_7", "rolling_mean_3", "rolling_mean_7", "rolling_mean_14"]
+FEATURES_BASE = COMMON_MODEL_PARAMS["features_base"]
+LAGS = COMMON_MODEL_PARAMS["lags"]
+ROLLING_WINDOWS = COMMON_MODEL_PARAMS["rolling_windows"]
+QTY_FEATURES = [f"lag_{lag}" for lag in LAGS] + [f"rolling_mean_{w}" for w in ROLLING_WINDOWS]
 
 
 
@@ -70,7 +68,10 @@ def build_lstm_model(n_products, n_features, window):
     model = Model([input_ts, input_prod], output)
     
     
-    model.compile(optimizer = tf.keras.optimizers.Adam(0.001), loss='mae')
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(0.001),
+        loss=COMMON_MODEL_PARAMS["loss_by_model"]["lstm"],
+    )
 
     return model
 
@@ -98,19 +99,23 @@ def _normalize_product_frame(g, market_max):
     if "unitvalue" in g.columns:
         g["unitvalue"] = g["unitvalue"].clip(lower=0)
 
-    g = add_lag_features(g, target=TARGET, lags=[1, 7, 14])
+    g = add_lag_features(g, target=TARGET, lags=LAGS, rolling_windows=ROLLING_WINDOWS)
 
     for c in QTY_FEATURES:
         if c in g.columns:
             g[c] = g[c] / market_max
     return g
 
-def process_file_lstm(path, market_max, scenario=None):
+def process_file_lstm(path, market_max, scenario=None, date_from=None, date_to=None):
 
     # Carregamento e tipagem de data
     df = pd.read_csv(path, parse_dates=['date'])
     df = normalize_columns(df)
     df = df.dropna(subset=[TARGET])
+    if date_from is not None:
+        df = df[df["date"] >= pd.to_datetime(date_from)]
+    if date_to is not None:
+        df = df[df["date"] <= pd.to_datetime(date_to)]
 
     # aplicações de cenários (volume, price, kmeans)
     if scenario is not None:
@@ -122,11 +127,13 @@ def process_file_lstm(path, market_max, scenario=None):
             print(f"Aviso: não foi possível aplicar cenário {scenario}")
     
     product_map = {pid: i for i, pid in enumerate(sorted(df["product_id"].unique()))}
+    inv_product_map = {i: pid for pid, i in product_map.items()}
     df["product_idx"] = df["product_id"].map(product_map)
 
     df = df.sort_values(["product_idx", "date"])
 
     results = []
+    predictions_rows = []
 
     for product_idx, g in df.groupby("product_idx"):
 
@@ -143,8 +150,8 @@ def process_file_lstm(path, market_max, scenario=None):
             continue
 
         n = len(g)
-        train_end = int(n * 0.70)
-        val_end = int(n * 0.85)
+        train_end = int(n * TRAIN_RATIO)
+        val_end = int(n * (TRAIN_RATIO + VAL_RATIO))
 
         train_df = g.iloc[:train_end].copy()
         val_df = g.iloc[train_end:val_end].copy()
@@ -192,22 +199,34 @@ def process_file_lstm(path, market_max, scenario=None):
         p_real =  np.clip(preds, 0, None) * market_max
         
         metrics = evaluate(y_real, p_real)
+        test_dates = test_df["date"].iloc[WINDOW:].reset_index(drop=True)
 
         results.append({
             "model": "lstm",
             "arquivo": path.name,
-            "product_id": product_idx,
+            "product_id": inv_product_map.get(product_idx, product_idx),
             "mae": metrics["MAE"],
             "rmse": metrics["RMSE"],
             "smape": metrics["sMAPE"]
         })
+
+        for dt, y_t, y_p in zip(test_dates, y_real, p_real):
+            predictions_rows.append({
+                "model": "lstm",
+                "arquivo": path.name,
+                "product_id": inv_product_map.get(product_idx, product_idx),
+                "date": dt,
+                "y_true": float(y_t),
+                "y_pred": float(y_p),
+                "scenario": scenario
+            })
 
         # Limpeza rigorosa de memória para hardware limitado
         tf.keras.backend.clear_session()
         gc.collect()
 
 
-    return pd.DataFrame(results)
+    return pd.DataFrame(results), pd.DataFrame(predictions_rows)
 
 
 
@@ -228,18 +247,21 @@ def compute_market_max(market_path):
 
 
 def main():
-
+    global EPOCHS
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--scenario", type=str, default=None,
                         help="Cenário a ser aplicado (volume, price, kmeans)")
-    parser.add_argument("--epochs", type=int, default=50,
+    parser.add_argument("--epochs", type=int, default=EPOCHS,
                         help="Número de épocas de treinamento")
+    parser.add_argument("--date-from", type=str, default=None,
+                        help="Data inicial (YYYY-MM-DD) para filtrar histórico")
+    parser.add_argument("--date-to", type=str, default=None,
+                        help="Data final (YYYY-MM-DD) para filtrar histórico")
     args = parser.parse_args()
     set_global_seed(args.seed)
 
     # Sobrescrever EPOCHS se especificado
-    global EPOCHS
     EPOCHS = args.epochs
 
     # itera apenas sobre o cenário solicitado; o loop de cenários foi movido para main.py
@@ -253,12 +275,18 @@ def main():
         print(f"\nRodando LSTM em: {market_name} | max_global_quantity={market_max:.4f}")
 
         all_results = []
+        all_predictions = []
 
         for csv_file in market_path.glob("cat*.csv"):
-            df_res = process_file_lstm(csv_file, market_max=market_max, scenario=args.scenario)
+            df_res, df_pred = process_file_lstm(
+                csv_file, market_max=market_max, scenario=args.scenario,
+                date_from=args.date_from, date_to=args.date_to
+            )
 
             if not df_res.empty:
                 all_results.append(df_res)
+            if not df_pred.empty:
+                all_predictions.append(df_pred)
 
         if all_results:
             final = pd.concat(all_results, ignore_index=True)
@@ -268,6 +296,11 @@ def main():
             out_file = OUTPUT_BASE / f"{market_name}_lstm{suffix}.csv"
             final.to_csv(out_file, index=False)
             print(f"  Resultados salvos em {out_file}")
+
+            if all_predictions:
+                pred_file = OUTPUT_BASE / f"{market_name}_lstm{suffix}_predictions.csv"
+                pd.concat(all_predictions, ignore_index=True).to_csv(pred_file, index=False)
+                print(f"  Curva real vs predito salva em {pred_file}")
 
             # imprime métrica final para que o orquestrador capture
             mean_smap = final['smape'].mean()
@@ -280,4 +313,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

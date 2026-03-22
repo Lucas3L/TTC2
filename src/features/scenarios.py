@@ -1,5 +1,6 @@
 import pandas as pd
 from sklearn.cluster import KMeans
+from src.config.scenario_params import SCENARIO_PARAMS
 
 
 def apply_scenario(df, scenario):
@@ -22,8 +23,9 @@ def group_by_volume(df):
     Agrupamento baseado no volume médio de vendas.
     Divide os produtos em três grupos: baixo, médio e alto volume.
     """
+    cfg = SCENARIO_PARAMS["volume"]
     df["volume_cluster"] = pd.qcut(
-        df["quantity"], q=3, labels=["low", "medium", "high"]
+        df[cfg["source_column"]], q=cfg["q"], labels=cfg["labels"]
     )
     return df
 
@@ -33,8 +35,9 @@ def group_by_price(df):
     Agrupamento baseado no valor unitário do produto.
     Divide os produtos em baratos, médios e caros.
     """
+    cfg = SCENARIO_PARAMS["price"]
     df["price_cluster"] = pd.qcut(
-        df["unitvalue"], q=3, labels=["cheap", "mid", "expensive"]
+        df[cfg["source_column"]], q=cfg["q"], labels=cfg["labels"]
     )
     return df
 
@@ -44,9 +47,14 @@ def group_by_kmeans(df):
     Agrupamento não supervisionado via K-Means usando
     média de volume e preço por produto.
     """
-    X = df.groupby("product_id")[["quantity", "unitvalue"]].mean()
+    cfg = SCENARIO_PARAMS["kmeans"]
+    X = df.groupby(cfg["groupby_key"])[cfg["feature_columns"]].mean()
 
-    kmeans = KMeans(n_clusters=3, random_state=42, n_init="auto")
+    kmeans = KMeans(
+        n_clusters=cfg["n_clusters"],
+        random_state=cfg["random_state"],
+        n_init=cfg["n_init"],
+    )
     clusters = kmeans.fit_predict(X)
 
     cluster_map = dict(zip(X.index, clusters))

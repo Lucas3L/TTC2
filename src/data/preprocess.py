@@ -1,5 +1,6 @@
 from pathlib import Path
 import pandas as pd
+from datetime import datetime
 from validators import (corrigir_datas_temporais,
                         corrigir_valores_temporais,
                         tratar_outliers_iqr_por_produto,)
@@ -9,6 +10,27 @@ INPUT_BASE = Path("Dados/processed")
 OUTPUT_BASE = Path("Dados/preprocessed")
 
 OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
+discard_records = []
+
+
+def register_discard(
+    market: str,
+    csv_name: str,
+    reason: str,
+    severity: str = "warning",
+    rows_affected: int | None = None,
+):
+    discard_records.append(
+        {
+            "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "stage": "preprocess",
+            "severity": severity,
+            "market": market,
+            "csv_file": csv_name,
+            "reason": reason,
+            "rows_affected": rows_affected,
+        }
+    )
 
 for market_path in INPUT_BASE.iterdir():
 
@@ -27,7 +49,31 @@ for market_path in INPUT_BASE.iterdir():
         print(f"  Lendo {csv_file.name}")
 
         # Leitura do arquivo e conversão da coluna data
-        df = pd.read_csv(csv_file, parse_dates=["date"])  # espera snake_case
+        try:
+            df = pd.read_csv(csv_file, parse_dates=["date"])  # espera snake_case
+        except Exception as e:
+            print(f"    [ERRO] Falha de leitura em {csv_file.name}: {e}")
+            register_discard(
+                market_name,
+                csv_file.name,
+                f"read_error: {e}",
+                severity="critical",
+            )
+            continue
+
+        required_cols = {"date", "product_id", "quantity", "unitvalue", "productcost"}
+        missing_cols = required_cols - set(df.columns)
+        if missing_cols:
+            print(f"    [AVISO] Arquivo descartado por colunas ausentes: {sorted(missing_cols)}")
+            register_discard(
+                market_name,
+                csv_file.name,
+                f"missing_required_columns: {sorted(missing_cols)}",
+                severity="critical",
+            )
+            continue
+
+        original_len = len(df)
         # Detalha e salva as anomalias encontradas
         df["observation"] = "ok"
         anomalias = []
@@ -54,6 +100,17 @@ for market_path in INPUT_BASE.iterdir():
                 anomalias=anomalias
             )
 
+        if df.empty:
+            print(f"    [AVISO] Arquivo {csv_file.name} ficou vazio após validações.")
+            register_discard(
+                market_name,
+                csv_file.name,
+                "empty_after_validation",
+                severity="warning",
+                rows_affected=original_len,
+            )
+            continue
+
         # 3) Criação de novas features baseadas na data
         dow = df["date"].dt.dayofweek        
         df["month"] = df["date"].dt.month
@@ -78,3 +135,19 @@ for market_path in INPUT_BASE.iterdir():
                 market_output / f"anomalies_{csv_file.stem}.csv",
                 index=False
             )
+
+        dropped_rows = max(original_len - len(df), 0)
+        if dropped_rows > 0:
+            register_discard(
+                market_name,
+                csv_file.name,
+                f"rows_dropped_during_processing: {dropped_rows}",
+                severity="info",
+                rows_affected=dropped_rows,
+            )
+
+if discard_records:
+    discard_df = pd.DataFrame(discard_records)
+    discard_file = OUTPUT_BASE / "discarded_records_preprocess.csv"
+    discard_df.to_csv(discard_file, index=False)
+    print(f"\n[INFO] Log de descartes do preprocess salvo em: {discard_file}")
