@@ -55,6 +55,10 @@ def aggregate_all_models():
             # Identifica a origem do dado antes da junção global
             all_data.append(df)
 
+    if not all_data:
+        print("\n[AVISO] Nenhum arquivo de resultados encontrado para consolidação.")
+        return pd.DataFrame(columns=["model", "market", "arquivo", "mae", "rmse", "smape"])
+
     # Consolida todos os modelos em uma base única para análise estatística
     final = pd.concat(all_data, ignore_index=True)
 

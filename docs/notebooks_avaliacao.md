@@ -6,11 +6,11 @@ Esta avaliação mede utilidade prática para banca/reprodutibilidade.
 
 | Notebook | Células | Markdown | Código | Executadas | Outputs | Score | Recomendação |
 |---|---:|---:|---:|---:|---:|---:|---|
-| `01_analise_exploratoria.ipynb` | 10 | 0 | 10 | 0 | 0 | 35 | refatorar_urgente |
-| `02_processamento.ipynb` | 11 | 0 | 11 | 0 | 0 | 35 | refatorar_urgente |
-| `03_kmeans.ipynb` | 10 | 0 | 10 | 0 | 0 | 35 | refatorar_urgente |
-| `04_modelagem.ipynb` | 13 | 0 | 13 | 0 | 0 | 35 | refatorar_urgente |
-| `05_resultados_e_analise.ipynb` | 9 | 0 | 9 | 0 | 0 | 35 | refatorar_urgente |
+| `01_analise_exploratoria.ipynb` | 15 | 5 | 10 | 0 | 0 | 70 | refatorar |
+| `02_processamento.ipynb` | 16 | 5 | 11 | 0 | 0 | 70 | refatorar |
+| `03_kmeans.ipynb` | 15 | 5 | 10 | 0 | 0 | 70 | refatorar |
+| `04_modelagem.ipynb` | 18 | 5 | 13 | 0 | 0 | 70 | refatorar |
+| `05_resultados_e_analise.ipynb` | 14 | 5 | 9 | 0 | 0 | 70 | refatorar |
 
 ## Diagnóstico
 

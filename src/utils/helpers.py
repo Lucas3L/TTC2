@@ -18,18 +18,43 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def add_lag_features(df: pd.DataFrame, target: str = "quantity", lags=[1, 7, 14]) -> pd.DataFrame:
+def add_lag_features(
+    df: pd.DataFrame,
+    target: str = "quantity",
+    lags=None,
+    rolling_windows=None,
+) -> pd.DataFrame:
     """Append lag and rolling mean features for the specified target column.
 
-    The function returns a new frame with lag_{lag} columns and rolling_mean_3/7/14.
+    The function returns a new frame with lag_{lag} columns and
+    rolling_mean_{window} columns. Lags/rollings are computed por produto
+    (quando a coluna ``product_id`` existir) para evitar vazamento entre séries.
+    As médias móveis usam apenas histórico passado (``shift(1)``).
     """
-    for lag in lags:
-        df[f"lag_{lag}"] = df[target].shift(lag)
-    # rolling means windows fixed for convenience
-    df["rolling_mean_3"] = df[target].rolling(3).mean()
-    df["rolling_mean_7"] = df[target].rolling(7).mean()
-    df["rolling_mean_14"] = df[target].rolling(14).mean()
-    return df
+    if lags is None:
+        lags = [1, 7, 14]
+    if rolling_windows is None:
+        rolling_windows = [3, 7, 14]
+
+    out = df.copy()
+    group_cols = ["product_id"] if "product_id" in out.columns else None
+
+    if group_cols is not None:
+        out = out.sort_values(group_cols + (["date"] if "date" in out.columns else []))
+        grouped_target = out.groupby(group_cols, sort=False)[target]
+        for lag in lags:
+            out[f"lag_{lag}"] = grouped_target.shift(lag)
+        for w in rolling_windows:
+            out[f"rolling_mean_{w}"] = grouped_target.transform(
+                lambda s: s.shift(1).rolling(w, min_periods=1).mean()
+            )
+    else:
+        for lag in lags:
+            out[f"lag_{lag}"] = out[target].shift(lag)
+        for w in rolling_windows:
+            out[f"rolling_mean_{w}"] = out[target].shift(1).rolling(w, min_periods=1).mean()
+
+    return out
 
 
 

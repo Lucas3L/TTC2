@@ -1,14 +1,10 @@
-from pathlib import Path
 import os
-import sys
 import gc
 import argparse
 
 # Configurar path ANTES de importar módulos locais
-file_path = Path(__file__).resolve()
-root = file_path.parents[2]
-if str(root) not in sys.path:
-    sys.path.append(str(root))
+from src.utils.project_paths import add_project_root_to_sys_path
+root = add_project_root_to_sys_path(__file__)
 
 import pandas as pd
 import numpy as np
@@ -23,23 +19,26 @@ from src.utils.helpers import ensure_dir, normalize_columns, add_lag_features
 from src.utils.reproducibility import set_global_seed
 from src.models.evaluate import evaluate
 from src.utils.metrics import naive_market_smape
+from src.config.model_params import COMMON_MODEL_PARAMS
 
 # imports de cenário são opcionais
 from src.features.scenarios import apply_scenario
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-WINDOW = 14      # Janela de dias anteriores para predição
-BATCH_SIZE = 32  # Amostras por lote para controle de memória no Samsung Book 2
-EPOCHS = 50      # Máximo de iterações de treino
-PATIENCE = 6     # Tolerância para parada antecipada caso o erro não diminua
+WINDOW = COMMON_MODEL_PARAMS["window_size"]      # Janela de dias anteriores para predição
+BATCH_SIZE = COMMON_MODEL_PARAMS["training_by_model"]["gru"]["batch_size"]
+EPOCHS = COMMON_MODEL_PARAMS["training_by_model"]["gru"]["epochs"]
+PATIENCE = COMMON_MODEL_PARAMS["training_by_model"]["gru"]["patience"]
+TRAIN_RATIO = COMMON_MODEL_PARAMS["train_ratio"]
+VAL_RATIO = COMMON_MODEL_PARAMS["val_ratio"]
 
-# características básicas que valem para todos os modelos
-FEATURES_BASE = ['onpromotion', 'unitvalue', 'holiday', 'month', 'day_of_week', 'is_weekend']
+FEATURES_BASE = COMMON_MODEL_PARAMS["features_base"]
+LAGS = COMMON_MODEL_PARAMS["lags"]
+ROLLING_WINDOWS = COMMON_MODEL_PARAMS["rolling_windows"]
+QTY_FEATURES = [f"lag_{lag}" for lag in LAGS] + [f"rolling_mean_{w}" for w in ROLLING_WINDOWS]
 
 # caminhos base usando a raiz do projeto
-file_path = Path(__file__).resolve()
-root = file_path.parents[2]
 INPUT_BASE = root / "Dados" / "preprocessed"
 OUTPUT_BASE = ensure_dir(root / "Resultados" / "gru")
 
@@ -63,7 +62,7 @@ def build_gru_model(n_products, n_features, window):
     output = Dense(1, activation='softplus')(x)
 
     model = Model([input_ts, input_prod], output)
-    model.compile(optimizer='adam', loss='poisson')
+    model.compile(optimizer='adam', loss=COMMON_MODEL_PARAMS["loss_by_model"]["gru"])
     return model
 
 
@@ -92,7 +91,7 @@ def run_gru(X_train, y_train, id_train, X_val, y_val, id_val, X_test, y_test, id
     return preds
 
 def create_sequences(data, features, target, window ):
-    X, y, p = [], [], []
+    X, y, p, d = [], [], [], []
 
     for prod_id, g in data.groupby('product_id'):
         values_x = g[features].values
@@ -102,15 +101,18 @@ def create_sequences(data, features, target, window ):
             X.append(values_x[i:i+window])
             y.append(values_y[i+window])
             p.append(prod_id)
+            d.append(g["date"].iloc[i+window])
 
-    return np.array(X), np.array(y), np.array(p)
+    return np.array(X), np.array(y), np.array(p), np.array(d)
 
-def process_file(csv_file, scenario=None):
-    # carrega e aplica cenário caso exista
+def process_file(csv_file, scenario=None, date_from=None, date_to=None):
     df = pd.read_csv(csv_file, parse_dates=['date'])
     df = normalize_columns(df)
-    # elimina linhas com alvo ausente antes de qualquer transformação
     df = df.dropna(subset=[TARGET])
+    if date_from is not None:
+        df = df[df["date"] >= pd.to_datetime(date_from)]
+    if date_to is not None:
+        df = df[df["date"] <= pd.to_datetime(date_to)]
 
     if scenario is not None:
         try:
@@ -121,41 +123,34 @@ def process_file(csv_file, scenario=None):
     le = LabelEncoder()
     df['product_id'] = le.fit_transform(df['product_id'])
 
-    # geração de features adicionais (lags e médias móveis)
-    df = add_lag_features(df, TARGET)
-    # drop only rows missing values in the actual predictors/target
-    features = FEATURES_BASE + ['lag_1','lag_7','rolling_mean_3','rolling_mean_7','rolling_mean_14']
+    df = add_lag_features(df, TARGET, lags=LAGS, rolling_windows=ROLLING_WINDOWS)
+    features = [c for c in FEATURES_BASE if c in df.columns] + [c for c in QTY_FEATURES if c in df.columns]
     df = df.dropna(subset=features + [TARGET])
 
-    # lista final de características utilizadas
-    # (features defined above)
     df = df.sort_values(['product_id', 'date'])
 
-    # separa conjuntos por produto mas concatena para treinamento global
     train_list, val_list, test_list = [], [], []
     for pid, g in df.groupby('product_id'):
         n = len(g)
-        train_end = int(n * 0.70)
-        val_end = int(n * 0.85)
+        train_end = int(n * TRAIN_RATIO)
+        val_end = int(n * (TRAIN_RATIO + VAL_RATIO))
 
         train_list.append(g.iloc[:train_end].copy())
         val_list.append(g.iloc[train_end:val_end].copy())
         test_list.append(g.iloc[val_end:].copy())
 
     if not train_list or not test_list:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
     train_df = pd.concat(train_list, ignore_index=True)
     val_df = pd.concat(val_list, ignore_index=True)
     test_df = pd.concat(test_list, ignore_index=True)
 
-    # garantias de tamanho mínimo
     if len(train_df) < 1000 or len(test_df) < 300:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
     scaler_x = MinMaxScaler()
-    # convert feature columns to float then scale
-    features = FEATURES_BASE + ['lag_1','lag_7','rolling_mean_3','rolling_mean_7','rolling_mean_14']
+    features = [c for c in FEATURES_BASE if c in train_df.columns] + [c for c in QTY_FEATURES if c in train_df.columns]
     train_df[features] = train_df[features].astype(float)
     val_df[features]   = val_df[features].astype(float)
     test_df[features]  = test_df[features].astype(float)
@@ -164,14 +159,12 @@ def process_file(csv_file, scenario=None):
     val_df[features]   = scaler_x.transform(val_df[features])
     test_df[features]  = scaler_x.transform(test_df[features])
     
-    # sequências vetorizadas para todos os produtos
-    X_train, y_train, id_train = create_sequences(train_df, features, TARGET, WINDOW)
-    X_val, y_val, id_val = create_sequences(val_df, features, TARGET, WINDOW)
-    X_test, y_test, id_test = create_sequences(test_df, features, TARGET, WINDOW)
+    X_train, y_train, id_train, _ = create_sequences(train_df, features, TARGET, WINDOW)
+    X_val, y_val, id_val, _ = create_sequences(val_df, features, TARGET, WINDOW)
+    X_test, y_test, id_test, d_test = create_sequences(test_df, features, TARGET, WINDOW)
 
-    # parâmetros mínimos de amostra
     if len(X_train) < 1000 or len(X_test) < 300:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
     preds = run_gru(X_train, y_train, id_train, X_val, y_val, id_val, X_test, y_test, id_test)
 
@@ -181,36 +174,47 @@ def process_file(csv_file, scenario=None):
     y_test_inv = y_test
     preds_inv = np.clip(preds, 0, None)
 
-    # decodifica métricas
     metrics = evaluate(y_test_inv, preds_inv)
 
-    # apenas retorna as métricas globais para o arquivo
-    return pd.DataFrame([{
+    metrics_df = pd.DataFrame([{
         "model": "gru",
         "arquivo": csv_file.name,
         "mae": metrics["MAE"],
         "rmse": metrics["RMSE"],
         "smape": metrics["sMAPE"]
     }])
+    pred_df = pd.DataFrame({
+        "model": "gru",
+        "arquivo": csv_file.name,
+        "product_id": le.inverse_transform(id_test.astype(int)),
+        "date": d_test,
+        "y_true": y_test_inv.astype(float),
+        "y_pred": preds_inv.astype(float),
+        "scenario": scenario
+    })
+    return metrics_df, pred_df
 
 # variável de conveniência agora fornecida por reproducibility
 # função set_global_seed já importa de src.utils.reproducibility
 
 
 def main():
-
+    global EPOCHS
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--scenario", type=str, default=None,
                         help="Cenário a ser aplicado (volume, price, kmeans)")
-    parser.add_argument("--epochs", type=int, default=50,
+    parser.add_argument("--epochs", type=int, default=EPOCHS,
                         help="Número de épocas de treinamento")
+    parser.add_argument("--date-from", type=str, default=None,
+                        help="Data inicial (YYYY-MM-DD) para filtrar histórico")
+    parser.add_argument("--date-to", type=str, default=None,
+                        help="Data final (YYYY-MM-DD) para filtrar histórico")
     args = parser.parse_args()
 
     set_global_seed(args.seed)
 
     # Sobrescrever EPOCHS se especificado
-    global EPOCHS
     EPOCHS = args.epochs
 
     # o loop de cenários é gerenciado por main.py; aqui tratamos apenas o solicitado
@@ -222,12 +226,18 @@ def main():
         print(f"\nRodando GRU em: {market_name}")
 
         all_results = []
+        all_predictions = []
 
         for csv_file in market_path.glob("cat*.csv"):
-            df_res = process_file(csv_file, scenario=args.scenario)
+            df_res, df_pred = process_file(
+                csv_file, scenario=args.scenario,
+                date_from=args.date_from, date_to=args.date_to
+            )
 
             if not df_res.empty:
                 all_results.append(df_res)
+            if not df_pred.empty:
+                all_predictions.append(df_pred)
 
         if all_results:
             final = pd.concat(all_results, ignore_index=True)
@@ -236,6 +246,11 @@ def main():
             out_file = OUTPUT_BASE / f"{market_name}_gru{suffix}.csv"
             final.to_csv(out_file, index=False)
             print(f"  Resultados salvos em {out_file}")
+
+            if all_predictions:
+                pred_file = OUTPUT_BASE / f"{market_name}_gru{suffix}_predictions.csv"
+                pd.concat(all_predictions, ignore_index=True).to_csv(pred_file, index=False)
+                print(f"  Curva real vs predito salva em {pred_file}")
 
             mean_smap = final['smape'].mean()
             print(f"FINAL sMAPE: {mean_smap:.4f}")
