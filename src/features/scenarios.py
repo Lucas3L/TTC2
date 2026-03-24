@@ -24,9 +24,25 @@ def group_by_volume(df):
     Divide os produtos em três grupos: baixo, médio e alto volume.
     """
     cfg = SCENARIO_PARAMS["volume"]
-    df["volume_cluster"] = pd.qcut(
-        df[cfg["source_column"]], q=cfg["q"], labels=cfg["labels"]
-    )
+    # First, try to get the bin edges to determine the number of bins after duplicates are dropped
+    try:
+        # Get bin edges only
+        _, bin_edges = pd.qcut(
+            df[cfg["source_column"]], q=cfg["q"], retbins=True, duplicates="drop"
+        )
+        n_bins = len(bin_edges) - 1
+        labels = cfg["labels"]
+        # If not enough bins, reduce labels accordingly
+        if len(labels) != n_bins:
+            labels = labels[:n_bins]
+        df["volume_cluster"] = pd.qcut(
+            df[cfg["source_column"]], q=n_bins, labels=labels, duplicates="drop"
+        )
+    except ValueError as e:
+        # If still fails, fallback to no labels (just bin numbers)
+        df["volume_cluster"] = pd.qcut(
+            df[cfg["source_column"]], q=cfg["q"], labels=False, duplicates="drop"
+        )
     return df
 
 

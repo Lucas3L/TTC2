@@ -1,10 +1,20 @@
+
+
+# --- sys.path bootstrap: ensure project root is in sys.path before any src import ---
+import sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import gc
 import os
 import argparse
+import sys
 
-# Configurar path ANTES de importar módulos locais
-from src.utils.project_paths import add_project_root_to_sys_path
-root = add_project_root_to_sys_path(__file__)
+
+# --- (Optional) Debug sys.path ---
+print(f"[DEBUG][lstm_model] sys.path: {sys.path}")
 
 import numpy as np
 import pandas as pd
@@ -32,8 +42,8 @@ PATIENCE = COMMON_MODEL_PARAMS["training_by_model"]["lstm"]["patience"]
 TRAIN_RATIO = COMMON_MODEL_PARAMS["train_ratio"]
 VAL_RATIO = COMMON_MODEL_PARAMS["val_ratio"]
 
-INPUT_BASE = root / "Dados" / "preprocessed"
-OUTPUT_BASE = ensure_dir(root / "Resultados" / "lstm")
+INPUT_BASE = ROOT / "Dados" / "preprocessed"
+OUTPUT_BASE = ensure_dir(ROOT / "Resultados" / "lstm")
 
 TARGET = 'quantity'
 FEATURES_BASE = COMMON_MODEL_PARAMS["features_base"]

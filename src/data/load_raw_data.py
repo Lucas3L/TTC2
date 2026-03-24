@@ -200,9 +200,12 @@ for market_path in BASE_PATH.iterdir():
                     )
 
                     # em dias potencialmente sem operação (domingo/feriado), zero é plausível
-                    sunday_closed_mask = (
-                        (df_categoria["date"].dt.dayofweek == 6) if IGNORE_SUNDAY_ZERO else pd.Series(False, index=df_categoria.index)
-                    )
+                    try:
+                        sunday_closed_mask = (
+                            (df_categoria["date"].dt.dayofweek == 6) if globals().get("IGNORE_SUNDAY_ZERO", False) else pd.Series(False, index=df_categoria.index)
+                        )
+                    except Exception:
+                        sunday_closed_mask = pd.Series(False, index=df_categoria.index)
                     holiday_closed_mask = (
                         df_categoria[HOLIDAY_COLUMN].fillna(0).astype(float).gt(0)
                         if HOLIDAY_COLUMN in df_categoria.columns

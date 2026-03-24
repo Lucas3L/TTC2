@@ -1,14 +1,18 @@
-from pathlib import Path
-import os
+
+# --- sys.path bootstrap: ensure project root is in sys.path before any src import ---
 import sys
-import gc
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import pandas as pd
-import numpy as np
+import gc
 import argparse
 
-# Configurar path ANTES de importar módulos locais
-from src.utils.project_paths import add_project_root_to_sys_path
-root = add_project_root_to_sys_path(__file__)
+
+# --- (Optional) Debug sys.path ---
+print(f"[DEBUG][baseline] sys.path: {sys.path}")
 
 # imports utilitários
 from src.utils.reproducibility import set_global_seed
@@ -18,8 +22,10 @@ from src.models.evaluate import evaluate
 from src.config.model_params import COMMON_MODEL_PARAMS
 
 # Caminhos base usando raiz do projeto para evitar dependência de cwd
-INPUT_BASE = root / "Dados" / "preprocessed"
-OUTPUT_BASE = root / "Resultados" / "baseline_zero_aware"
+
+PROJECT_ROOT = ROOT
+INPUT_BASE = PROJECT_ROOT / "Dados" / "preprocessed"
+OUTPUT_BASE = PROJECT_ROOT / "Resultados" / "baseline_zero_aware"
 ensure_dir(OUTPUT_BASE)
 
 TARGET = "quantity"

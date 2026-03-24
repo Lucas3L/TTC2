@@ -1,10 +1,20 @@
+
+
+# --- sys.path bootstrap: ensure project root is in sys.path before any src import ---
+import sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import os
 import gc
 import argparse
+import sys
 
-# Configurar path ANTES de importar módulos locais
-from src.utils.project_paths import add_project_root_to_sys_path
-root = add_project_root_to_sys_path(__file__)
+
+# --- (Optional) Debug sys.path ---
+print(f"[DEBUG][gru_model] sys.path: {sys.path}")
 
 import pandas as pd
 import numpy as np
@@ -39,8 +49,8 @@ ROLLING_WINDOWS = COMMON_MODEL_PARAMS["rolling_windows"]
 QTY_FEATURES = [f"lag_{lag}" for lag in LAGS] + [f"rolling_mean_{w}" for w in ROLLING_WINDOWS]
 
 # caminhos base usando a raiz do projeto
-INPUT_BASE = root / "Dados" / "preprocessed"
-OUTPUT_BASE = ensure_dir(root / "Resultados" / "gru")
+INPUT_BASE = ROOT / "Dados" / "preprocessed"
+OUTPUT_BASE = ensure_dir(ROOT / "Resultados" / "gru")
 
 TARGET = 'quantity'
 
