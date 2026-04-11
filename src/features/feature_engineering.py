@@ -33,35 +33,33 @@ def create_sequences_by_product(df, features, target, window , positive_weight=3
     # Conversão final para o formato de tensor 3D exigido por modelos LSTM e GRU
     return np.array(X_sequences), np.array(y_sequences), np.array(sample_weights)
 
-def add_price_segments(df):
-    # Segmentação por Preço (Quartis)
-    df['price_segment'] = pd.qcut(df['unitvalue'], 4, labels=[1, 2, 3, 4])
-    return df
 
-def add_volume_segments(df):
-    # Segmentação por Volume (Acima/Abaixo da Mediana)
-    median_vol = df.groupby('product_id')['quantity'].transform('sum').median()
-    df['volume_segment'] = df.groupby('product_id')['quantity'].transform('sum') >= median_vol
-    return df
 
 def build_features(
     df,
     target_col="quantity",
-    date_col="Date",
+    date_col="date",
     window=7,
     positive_weight=3.0
 ):
-    features = [
-        col for col in df.columns
-        if col not in [target_col, date_col, "product_id"]
-    ]
+    # 1. Bloqueia colunas de metadados e observation
+    forbidden = [target_col, date_col, "product_id", "observation", "category", "market"]
+    features = [col for col in df.columns if col not in forbidden]
 
+    # 2. Garante que as features são numéricas
+    df_numeric = df.copy()
+    for col in features:
+        if df_numeric[col].dtype == 'object':
+            df_numeric[col] = pd.to_numeric(df_numeric[col], errors='coerce').fillna(0)
+
+    # 3. (Sugestão) Normalização: Aplique MinMaxScaler nas features numéricas antes do build_features para melhor performance do LSTM.
+
+    # 4. Geração das sequências
     X, y, w = create_sequences_by_product(
-        df=df,
+        df=df_numeric,
         features=features,
         target=target_col,
         window=window,
         positive_weight=positive_weight,
     )
-
     return X, y, w

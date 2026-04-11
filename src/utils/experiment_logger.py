@@ -18,7 +18,14 @@ class ExperimentLogger:
             "random_seed": seed,          # Semente para garantir reprodutibilidade futura
             **metrics                     # Desempacota as métricas
         }
-        self.records.append(record) # Adiciona o experimento à memória temporária
+        self.records.append(record) # Mantém na memória para compatibilidade
+
+        # Salva imediatamente no CSV para evitar perda de dados
+        import os
+        from pathlib import Path
+        df_single = pd.DataFrame([record])
+        file_exists = Path(self.out_path).exists()
+        df_single.to_csv(self.out_path, mode='a', index=False, header=not file_exists)
 
     def save(self):
         # Converte a lista de dicionários acumulada em um DataFrame do Pandas

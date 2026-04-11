@@ -27,24 +27,32 @@ def process_market(market_dir):
 
     for file in market_dir.glob("*.csv"):
         print(f"  Gerando features para {file.name}")
-
         df = pd.read_csv(file)
-        print(df.columns.tolist())
-
-        X, y, w= build_features(
-            df,
-            target_col="quantity",
-            date_col="date",
-            window=7,
-            positive_weight=3.0
-        )
-
-        np.save(out_market_dir / f"X_{file.stem}.npy", X)
-        np.save(out_market_dir / f"y_{file.stem}.npy", y)
-        np.save(out_market_dir / f"w_{file.stem}.npy", w)    
-        output_path = out_market_dir / file.name
-
-        print(f"    Salvo em {out_market_dir}")
+        all_X, all_y, all_w = [], [], []
+        # Isolamento por produto: cada janela pertence a um único product_id
+        for pid, group in df.groupby("product_id"):
+            group = group.sort_values("date")
+            X_p, y_p, w_p = build_features(
+                group,
+                target_col="quantity",
+                date_col="date",
+                window=7,
+                positive_weight=3.0
+            )
+            if len(X_p) > 0:
+                all_X.append(X_p)
+                all_y.append(y_p)
+                all_w.append(w_p)
+        if all_X:
+            final_X = np.concatenate(all_X).astype('float32')
+            final_y = np.concatenate(all_y).astype('float32')
+            final_w = np.concatenate(all_w).astype('float32')
+            np.save(out_market_dir / f"X_{file.stem}.npy", final_X)
+            np.save(out_market_dir / f"y_{file.stem}.npy", final_y)
+            np.save(out_market_dir / f"w_{file.stem}.npy", final_w)
+            print(f"    Salvo em {out_market_dir}")
+        else:
+            print(f"    Nenhuma sequência válida para {file.name}")
 
 def main():
     for market_dir in INPUT_DIR.iterdir():

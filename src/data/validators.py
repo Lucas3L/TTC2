@@ -8,17 +8,17 @@ ZERO_CONTEXT_THRESHOLD = 5.0
 IGNORE_SUNDAY_ZERO = True
 HOLIDAY_COLUMN = "holiday"
 
-
-# --- Correção de datas temporais (usa 'date') ---
 def corrigir_datas_temporais(df, max_faltantes=2, anomalias=None):
-    if anomalias is None:
-        anomalias = []
-
+    """
+    Cria linhas para datas faltantes. 
+    Preço e Custo são herdados (ffill), mas Quantidade fica como NaN para 
+    ser tratada pela interpolação estatística, evitando o 'Time Shift'.
+    """
+    if anomalias is None: anomalias = []
     df = df.copy()
-    # garante datetime em 'date'
     df["date"] = pd.to_datetime(df["date"])
-
     novos = []
+
     for product_id, g in df.groupby("product_id"):
         g = g.sort_values("date")
         datas = g["date"]
@@ -27,141 +27,101 @@ def corrigir_datas_temporais(df, max_faltantes=2, anomalias=None):
 
         if 0 < len(faltantes) <= max_faltantes:
             for data in faltantes:
-                linha = g.iloc[-1].copy()
+                # Busca o registro anterior para herdar metadados (categoria, preço, etc)
+                anterior = g[g["date"] < data]
+                if not anterior.empty:
+                    linha = anterior.iloc[-1].copy()
+                else:
+                    linha = g.iloc[0].copy()
+                
                 linha["date"] = data
                 linha["observation"] = "date_interpolated"
-                for c in ["quantity", "unitvalue", "productcost"]:
-                    if c in linha:
-                        linha[c] = np.nan
+                # CRÍTICO: Deixamos quantity como NaN para a função seguinte interpolar,
+                # impedindo que a Terça receba o valor exato da Segunda (ffill).
+                if "quantity" in linha: linha["quantity"] = np.nan
                 novos.append(linha)
         elif len(faltantes) > max_faltantes:
-            g = g.copy()
-            g["observation"] = "date_gap_severe"
-            anomalias.extend(g.to_dict("records"))
+            anom_g = g.copy()
+            anom_g["observation"] = "date_gap_severe"
+            anomalias.extend(anom_g.to_dict("records"))
 
     if novos:
         df = pd.concat([df, pd.DataFrame(novos)], ignore_index=True)
-
     return df, anomalias
 
-
-# --- Tratamento de Outliers usando IQR por produto ---
-def tratar_outliers_iqr_por_produto(df, coluna, iqr_factor=1.5, anomalias=None):
-    """Remove outliers usando IQR por produto.
-    
-    Retorna (df, anomalias) para compatibilidade com o pipeline.
-    """
-    if anomalias is None:
-        anomalias = []
-    
+def tratar_outliers_iqr_por_produto(df, coluna, iqr_factor=None, anomalias=None):
+    if anomalias is None: anomalias = []
     df = df.copy()
     col = coluna.lower()
+    if iqr_factor is None:
+        iqr_factor = 3.0 if col == "quantity" else 1.5
     
-    # cria coluna observation se não existir
-    if "observation" not in df.columns:
-        df["observation"] = "ok"
-    
-    for product_id, g in df.groupby("product_id"):
-        Q1 = g[col].quantile(0.25)
-        Q3 = g[col].quantile(0.75)
-        IQR = Q3 - Q1
-        
-        lower_bound = Q1 - iqr_factor * IQR
-        upper_bound = Q3 + iqr_factor * IQR
-        
-        # identifica outliers
-        outlier_mask = (g[col] < lower_bound) | (g[col] > upper_bound)
-        
-        if outlier_mask.any():
-            outliers = g[outlier_mask].copy()
-            outliers["observation"] = f"{col}_outlier_removed"
+    for pid, g in df.groupby("product_id"):
+        q1 = g[col].quantile(0.25)
+        q3 = g[col].quantile(0.75)
+        iqr = q3 - q1
+        upper_bound = q3 + (iqr_factor * iqr)
+        lower_bound = q1 - (iqr_factor * iqr)
+
+        # Proteção: Promoção e Feriado NÃO sofrem clipping (são picos reais)
+        mask_outlier = (
+            ((g[col] < lower_bound) | (g[col] > upper_bound)) & 
+            (g.get('onpromotion', 0).fillna(0) == 0) & 
+            (g.get('holiday', 0).fillna(0) == 0)
+        )
+
+        if mask_outlier.any():
+            idx = g[mask_outlier].index
+            outliers = g[mask_outlier].copy()
+            outliers["observation"] = f"{col}_outlier_clipped"
             anomalias.extend(outliers.to_dict("records"))
             
-            # substitui outliers pela mediana do produto
-            median = g[col].median()
-            df.loc[g[outlier_mask].index, col] = median
-            df.loc[g[outlier_mask].index, "observation"] = f"{col}_median_imputed"
-    
+            # Clipping: Trava no limite estatístico para não "cegar" o modelo
+            df.loc[idx, col] = np.clip(df.loc[idx, col], lower_bound, upper_bound)
+            df.loc[idx, "observation"] = f"{col}_clipped"
+            
     return df, anomalias
 
-
-# --- Correção vetorizada de valores temporais ---
 def corrigir_valores_temporais(df, coluna, window=7, anomalias=None):
-    """Versão vetorizada que corrige valores <=0 ou NaN usando média móvel por produto.
-
-    Retorna (df, anomalias) para compatibilidade com o pipeline.
     """
-    if anomalias is None:
-        anomalias = []
-
+    Corrige falhas usando interpolação linear (tendência) em vez de ffill (repetição).
+    Isso garante que terça seja um degrau entre segunda e quarta, e não uma cópia.
+    """
+    if anomalias is None: anomalias = []
     df = df.copy()
-
-    # normaliza nome da coluna para lidar com inputs como 'Quantity' ou 'quantity'
     col = coluna.lower()
-
-    # cria coluna observation se não existir
-    if "observation" not in df.columns:
-        df["observation"] = "ok"
-
-    # máscara de inválidos
+    
+    # Identificação de falhas
     if col == "quantity":
         qty = df[col].astype(float)
-
-        local_mean_non_zero = (
-            df.groupby("product_id")[col]
-            .transform(
-                lambda x: x.where(x != 0).rolling(
-                    window=ZERO_CONTEXT_WINDOW,
-                    min_periods=ZERO_CONTEXT_MIN_PERIODS,
-                    center=True,
-                ).mean()
-            )
+        local_mean = df.groupby("product_id")[col].transform(
+            lambda x: x.where(x != 0).rolling(window=ZERO_CONTEXT_WINDOW, min_periods=1, center=True).mean()
         )
-
-        if "date" in df.columns and IGNORE_SUNDAY_ZERO:
-            sunday_closed_mask = df["date"].dt.dayofweek == 6
-        else:
-            sunday_closed_mask = pd.Series(False, index=df.index)
-
-        holiday_closed_mask = (
-            df[HOLIDAY_COLUMN].fillna(0).astype(float).gt(0)
-            if HOLIDAY_COLUMN in df.columns
-            else pd.Series(False, index=df.index)
-        )
-        closure_mask = sunday_closed_mask | holiday_closed_mask
-
-        suspicious_zero_mask = (
-            qty.eq(0)
-            & local_mean_non_zero.notna()
-            & (local_mean_non_zero >= ZERO_CONTEXT_THRESHOLD)
-            & (~closure_mask)
-        )
-
-        invalid_mask = qty.isna() | (qty < 0) | suspicious_zero_mask
-        valid_series = qty.where(~invalid_mask)
+        
+        sunday_mask = (df["date"].dt.dayofweek == 6) if IGNORE_SUNDAY_ZERO else False
+        holiday_mask = df[HOLIDAY_COLUMN].fillna(0).gt(0) if HOLIDAY_COLUMN in df.columns else False
+        
+        suspicious_zero = (qty == 0) & (~sunday_mask) & (~holiday_mask) & (local_mean >= ZERO_CONTEXT_THRESHOLD)
+        invalid_mask = qty.isna() | (qty < 0) | suspicious_zero
     else:
         invalid_mask = df[col].isna() | (df[col] <= 0)
-        valid_series = df[col].where(df[col] > 0)
 
-    # média móvel por produto para imputação de pontos inválidos
-    rolling_mean = (
-        valid_series.groupby(df["product_id"])
-        .transform(lambda x: x.rolling(window=window, center=True, min_periods=1).mean())
+    # TRATAMENTO: Substitui inválidos por NaN para interpolar
+    df.loc[invalid_mask, col] = np.nan
+    
+    # INTERPOLAÇÃO LINEAR: O segredo para evitar o "terça vira segunda"
+    # Ele traça uma linha reta entre os pontos válidos.
+    df[col] = df.groupby("product_id")[col].transform(
+        lambda x: x.interpolate(method='linear', limit_direction='both')
     )
-
-    # aplica correção vetorizada
-    df.loc[invalid_mask, "observation"] = f"{col}_corrected_vectorized"
-    df[col] = df[col].where(~invalid_mask, rolling_mean)
-
-    # backup com média global por produto
-    global_mean = df.groupby("product_id")[col].transform("mean")
-    df[col] = df[col].fillna(global_mean)
-
-    # casos extremos: se ainda houver NaN, marca anomalia severa e preenche com 0
-    if df[col].isna().any():
-        anom_sev = df.loc[df[col].isna()].copy()
-        anom_sev["observation"] = f"{col}_invalid_severe"
-        anomalias.extend(anom_sev.to_dict("records"))
-        df[col] = df[col].fillna(0)
-
+    
+    df.loc[invalid_mask, "observation"] = f"{col}_interpolated"
+    
+    # Fallbacks de segurança para UnitValue e Cost (Preço não pode ser zero)
+    if col in ["unitvalue", "productcost"]:
+        df[col] = df[col].fillna(df.groupby("product_id")[col].transform("mean"))
+        df[col] = df[col].fillna(df.groupby("category")[col].transform("mean"))
+        # Caso extremo (produto novo sem histórico nenhum)
+        df[col] = df[col].fillna(1.0) 
+        
     return df, anomalias

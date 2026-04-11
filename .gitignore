@@ -7,6 +7,7 @@ Dados/
 # Resultados gerados
 results/
 Resultados/
+Resultado1/
 *.csv
 
 # Python

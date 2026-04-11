@@ -1,6 +1,5 @@
-import tensorflow as tf
-import subprocess
 import sys
+import subprocess
 import time
 import csv
 import re
@@ -8,6 +7,8 @@ from pathlib import Path
 from datetime import datetime
 import argparse
 import math
+
+from sklearn import metrics
 from src.config.experiment_config import DEFAULT_EXPERIMENT_CONFIG
 from src.utils.helpers import ensure_dir
 from src.utils.reproducibility import set_global_seed
@@ -39,10 +40,10 @@ def _validate_date_str(date_str: str, field_name: str):
 def extract_metrics(output: str):
     """
     Extração universal via Regex. 
-    Busca padrões como 'FINAL sMAPE: 10.5' ou 'MAE: 2.3'
+    Busca TODAS as ocorrências de métricas (útil se houver múltiplos markets)
+    e retorna a média aritmética delas.
     """
     metrics = {}
-    # aceita formatos como 12.34, 1e-03, -2.5E+02 ou nan
     float_re = r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?|nan|NaN)"
     patterns = {
         "smape": rf"FINAL sMAPE:\s*{float_re}",
@@ -51,18 +52,26 @@ def extract_metrics(output: str):
     }
     
     for key, pattern in patterns.items():
-        match = re.search(pattern, output)
-        if not match:
+        matches = re.findall(pattern, output)
+        if not matches:
             metrics[key] = None
             continue
 
-        val_str = match.group(1)
-        try:
-            val = float(val_str)
-            # normalize NaN to None for clearer downstream handling
-            metrics[key] = None if math.isnan(val) else val
-        except Exception:
+        valid_vals = []
+        for val_str in matches:
+            try:
+                val = float(val_str)
+                if not math.isnan(val):
+                    valid_vals.append(val)
+            except Exception:
+                pass
+        
+        # Se achou valores válidos, calcula a média de todos os mercados impressos
+        if valid_vals:
+            metrics[key] = sum(valid_vals) / len(valid_vals)
+        else:
             metrics[key] = None
+            
     return metrics
 
 def run_model(
@@ -203,7 +212,7 @@ def main():
         for scenario in SCENARIOS:
             for model_name, script_path in MODELS.items():
                 
-                # Executa o modelo
+                # Executa o modelo de forma isolada no Sistema Operacional
                 metrics, runtime, status = run_model(
                     model_name, script_path, current_seed, replica_id, scenario,
                     date_from=args.date_from,
@@ -218,18 +227,14 @@ def main():
                         model_name, replica_id, current_seed, 
                         metrics, runtime, status, scenario
                     )
-                
-                # Controle de memória preventivo (opcional se scripts filhos já fazem gc)
-                tf.keras.backend.clear_session()
 
     print(f"\n================ EXPERIMENTOS FINALIZADOS ================")
     print(f"Logs de erro (se houver): {ERROR_LOG}")
     print(f"Arquivos de resultados gerados em: {OUTPUT_DIR}")
-
-    # Geração automática dos gráficos ao final do pipeline
+                # Controle de memória preventivo removido: cada script filho faz sua própria limpeza.
     try:
         print("\nGerando gráficos dos resultados...")
-        subprocess.run(["python", str(SRC_DIR / "utils" / "plots.py")], check=True)
+        subprocess.run([sys.executable, str(SRC_DIR / "utils" / "plots.py")], check=True)
         print("Gráficos salvos em Resultados/plots/")
     except Exception as e:
         print(f"[!] Falha ao gerar gráficos automaticamente: {e}")

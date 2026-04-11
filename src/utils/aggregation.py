@@ -67,6 +67,13 @@ def aggregate_all_models():
     final.to_csv(out, index=False)
 
     print(f"\n Resultados consolidados salvos em: {out}")
+
+    # RESUMO GERAL DE PERFORMANCE
+    if not final.empty:
+        summary = final.groupby("model")[["mae", "rmse", "smape"]].mean().sort_values("smape")
+        print("\n--- RESUMO GERAL DE PERFORMANCE ---")
+        print(summary)
+
     return final
 
 

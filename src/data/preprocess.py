@@ -1,153 +1,140 @@
-from pathlib import Path
+import gc
+import os
 import pandas as pd
-from datetime import datetime
-from validators import (corrigir_datas_temporais,
-                        corrigir_valores_temporais,
-                        tratar_outliers_iqr_por_produto,)
 import numpy as np
+from pathlib import Path
+from datetime import datetime, timezone
 
-INPUT_BASE = Path("Dados/processed")
+# Importação dos validadores customizados
+from validators import (
+    corrigir_datas_temporais,
+    corrigir_valores_temporais,
+    tratar_outliers_iqr_por_produto,
+)
+
+# --- Configurações de Ambiente ---
+INPUT_BASE = Path("Dados/raw")
 OUTPUT_BASE = Path("Dados/preprocessed")
-
 OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
+
 discard_records = []
 
+def register_discard(stage, reason, market, category, file_path):
+    """Registra falhas de integridade para auditoria do TCC."""
+    discard_records.append({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "stage": stage,
+        "reason": reason,
+        "market": market,
+        "category": category,
+        "file_path": file_path
+    })
 
-def register_discard(
-    market: str,
-    csv_name: str,
-    reason: str,
-    severity: str = "warning",
-    rows_affected: int | None = None,
-):
-    discard_records.append(
-        {
-            "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-            "stage": "preprocess",
-            "severity": severity,
-            "market": market,
-            "csv_file": csv_name,
-            "reason": reason,
-            "rows_affected": rows_affected,
-        }
-    )
-
+# --- Pipeline Principal ---
 for market_path in INPUT_BASE.iterdir():
-
     if not market_path.is_dir():
         continue
-
+    
     market_name = market_path.name
-    print(f"\nProcessando mercado: {market_name}")
-
-    # Organiza os caminhos de saida e cria um diretoria caso não exista
+    print(f"\n>>> Processando Mercado: {market_name}")
     market_output = OUTPUT_BASE / market_name
     market_output.mkdir(parents=True, exist_ok=True)
 
-    # Lê os arquivos csv que iniciam com cat e imprime o nome do arquivo
-    for csv_file in market_path.glob("cat*.csv"):
-        print(f"  Lendo {csv_file.name}")
-
-        # Leitura do arquivo e conversão da coluna data
-        try:
-            df = pd.read_csv(csv_file, parse_dates=["date"])  # espera snake_case
-        except Exception as e:
-            print(f"    [ERRO] Falha de leitura em {csv_file.name}: {e}")
-            register_discard(
-                market_name,
-                csv_file.name,
-                f"read_error: {e}",
-                severity="critical",
-            )
+    for category_path in market_path.iterdir():
+        if not category_path.is_dir():
             continue
+        
+        category_code = category_path.name.split("-")[0]
+        print(f"  Categoria: {category_code}")
+        dados_categoria = []
 
-        required_cols = {"date", "product_id", "quantity", "unitvalue", "productcost"}
-        missing_cols = required_cols - set(df.columns)
-        if missing_cols:
-            print(f"    [AVISO] Arquivo descartado por colunas ausentes: {sorted(missing_cols)}")
-            register_discard(
-                market_name,
-                csv_file.name,
-                f"missing_required_columns: {sorted(missing_cols)}",
-                severity="critical",
-            )
-            continue
+        # 1. Fase de Ingestão e Padronização de Colunas
+        for csv_file in category_path.glob("*.csv"):
+            try:
+                # Leitura robusta com detecção de separador e encoding sig (remove BOM do Excel)
+                df = pd.read_csv(csv_file, sep=None, engine='python', encoding='utf-8-sig')
+                
+                # Normalização de nomes (remove espaços, pontos e underscores temporariamente para mapeamento)
+                df.columns = [c.lower().strip().replace(' ', '').replace('.', '') for c in df.columns]
+                
+                # Injeção Crítica: Prioridade ao ID do arquivo (metadado) para evitar perda de dados
+                product_id_from_file = csv_file.stem.split("_")[0]
+                df['product_id'] = product_id_from_file
 
-        original_len = len(df)
-        # Detalha e salva as anomalias encontradas
-        df["observation"] = "ok"
-        anomalias = []
+                # Mapeamento para o padrão do Pipeline
+                mapping = {
+                    'productcost': 'productcost',
+                    'product_cost': 'productcost',
+                    'quantity': 'quantity',
+                    'date': 'date',
+                    'unitvalue': 'unitvalue',
+                    'onpromotion': 'onpromotion',
+                    'holiday': 'holiday'
+                }
+                df = df.rename(columns=mapping)
+                
+                # Garantia de Tipagem
+                df["date"] = pd.to_datetime(df["date"], errors="coerce")
+                
+                # SÓ dropamos se a data for inválida. Quantity NaN será tratado nos validadores.
+                df = df.dropna(subset=["date"])
+                df["category"] = category_code
+                df["market"] = market_name
+                
+                dados_categoria.append(df)
+                
+            except Exception as e:
+                register_discard("raw_ingestion", str(e), market_name, category_code, str(csv_file))
 
-        # 1) Correção de datas (vetorizada por produto)
-        df, anomalias = corrigir_datas_temporais(
-            df,
-            max_faltantes=2,
-            anomalias=anomalias
-        )
-        for coluna in ["quantity", "unitvalue", "productcost"]:
-            df, anomalias = corrigir_valores_temporais(
-            df,
-            coluna=coluna,
-            window=7,
-            anomalias=anomalias
-        )
-        # 2) Correção de valores (vetorizada) - usa nomes em snake_case
-        for coluna in ["quantity", "unitvalue", "productcost"]:
-            df, anomalias = tratar_outliers_iqr_por_produto(
-                df,
-                coluna=coluna,
-                iqr_factor=1.5,
-                anomalias=anomalias
-            )
+        # 2. Fase de Limpeza Estatística e Consolidação
+        if dados_categoria:
+            df_cat = pd.concat(dados_categoria, ignore_index=True)
+            
+            # GARANTIA DE INTEGRIDADE: Remove duplicatas (evita bias no modelo)
+            df_cat = df_cat.drop_duplicates(subset=["product_id", "date"], keep="last")
+            
+            anomalias = []
 
-        if df.empty:
-            print(f"    [AVISO] Arquivo {csv_file.name} ficou vazio após validações.")
-            register_discard(
-                market_name,
-                csv_file.name,
-                "empty_after_validation",
-                severity="warning",
-                rows_affected=original_len,
-            )
-            continue
+            # Sequência lógica de tratamento: Datas -> Valores -> Outliers
+            df_cat, anomalias = corrigir_datas_temporais(df_cat, anomalias=anomalias)
 
-        # 3) Criação de novas features baseadas na data
-        dow = df["date"].dt.dayofweek        
-        df["month"] = df["date"].dt.month
-        df["is_weekend"] = dow.isin([5, 6]).astype(int)
+            for col in ["quantity", "unitvalue", "productcost"]:
+                if col in df_cat.columns:
+                    # Resolve falhas (ffill/bfill/rolling mean)
+                    df_cat, anomalias = corrigir_valores_temporais(df_cat, col, anomalias=anomalias)
+                    # Resolve extremos com Clipping (Fator 3.0 para preservar picos saudáveis)
+                    df_cat, anomalias = tratar_outliers_iqr_por_produto(df_cat, col, iqr_factor=3.0, anomalias=anomalias)
 
-        # 4) Features cíclicas (seno/cosseno)
-        df["day_sin"] = np.sin(2 * np.pi * dow / 7)
-        df["day_cos"] = np.cos(2 * np.pi * dow / 7)
-        df["month_sin"] = np.sin(2 * np.pi * (df["month"] - 1) / 12)
-        df["month_cos"] = np.cos(2 * np.pi * (df["month"] - 1) / 12)
+            # 3. Engenharia de Atributos Cíclicos (Sazonalidade para Redes Neurais)
+            # Transforma tempo linear em coordenadas circulares
+            dow = df_cat["date"].dt.dayofweek
+            df_cat["day_sin"] = np.sin(2 * np.pi * dow / 7)
+            df_cat["day_cos"] = np.cos(2 * np.pi * dow / 7)
+            
+            df_cat["month"] = df_cat["date"].dt.month
+            df_cat["month_sin"] = np.sin(2 * np.pi * (df_cat["month"]-1) / 12)
+            df_cat["month_cos"] = np.cos(2 * np.pi * (df_cat["month"]-1) / 12)
 
-        # Define o arquivo de saida e salva tudo no formato .csv
-        output_file = market_output / csv_file.name
+            # Limpeza final de colunas de apoio
+            df_cat = df_cat.drop(columns=['productid', 'unnamed:0'], errors='ignore')
 
-        # Salvamento do arquivo csv e sinalização o salvamento
-        df.to_csv(output_file, index=False)
-        print(f"    [OK] Salvo em {output_file}")
+            # 4. Persistência dos Artefatos
+            output_file = market_output / f"cat{category_code}.csv"
+            df_cat.to_csv(output_file, index=False)
+            print(f"    [OK] {output_file.name} salvo com {len(df_cat)} registros.")
 
-        # Salva as anomalias encontradas em um arquivo separado
-        if anomalias:
-            pd.DataFrame(anomalias).to_csv(
-                market_output / f"anomalies_{csv_file.stem}.csv",
-                index=False
-            )
+            if anomalias:
+                anomalias_file = market_output / f"anomalias_{category_code}.csv"
+                pd.DataFrame(anomalias).to_csv(anomalias_file, index=False)
 
-        dropped_rows = max(original_len - len(df), 0)
-        if dropped_rows > 0:
-            register_discard(
-                market_name,
-                csv_file.name,
-                f"rows_dropped_during_processing: {dropped_rows}",
-                severity="info",
-                rows_affected=dropped_rows,
-            )
+            # Gestão de memória para datasets grandes
+            del df_cat
+            dados_categoria.clear()
+            gc.collect()
 
+# Salva trilha de descarte para auditoria do TCC
 if discard_records:
-    discard_df = pd.DataFrame(discard_records)
-    discard_file = OUTPUT_BASE / "discarded_records_preprocess.csv"
-    discard_df.to_csv(discard_file, index=False)
-    print(f"\n[INFO] Log de descartes do preprocess salvo em: {discard_file}")
+    pd.DataFrame(discard_records).to_csv(OUTPUT_BASE / "discarded_pipeline.csv", index=False)
+    print(f"\n[INFO] Relatório de descartes gerado em: {OUTPUT_BASE / 'discarded_pipeline.csv'}")
+
+print("\n================ PREPROCESSAMENTO CONCLUÍDO ================")

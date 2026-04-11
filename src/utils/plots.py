@@ -1,313 +1,94 @@
-from __future__ import annotations
-from pathlib import Path
-import argparse
-import csv
-from collections import defaultdict
 import os
+import glob
 import datetime
+import argparse
+import numpy as np
 import pandas as pd
+from pathlib import Path
+from collections import defaultdict
 
+# --- Configurações de Diretório ---
+BASE_DIR = Path(__file__).resolve().parents[2]
+RESULTS_PATH = BASE_DIR / "Resultados"
+OUTPUT_DIR = RESULTS_PATH / "plots"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 def _get_plt():
+    """Tenta importar matplotlib de forma segura para ambientes sem interface gráfica."""
     try:
         import matplotlib.pyplot as plt
+        plt.style.use("seaborn-v0_8-whitegrid")
+        return plt
     except ModuleNotFoundError:
+        print("[AVISO] Matplotlib não encontrado. Gráficos não serão gerados.")
         return None
-    plt.style.use("seaborn-v0_8-whitegrid")
-    return plt
 
-
-
-DEFAULT_RESULTS_FILE = Path("Resultados/consolidated_results.csv")
-DEFAULT_OUTPUT_DIR = Path("Resultados/plots")
-
-
-# Definição dos caminhos para leitura dos dados consolidados e salvamento das imagens
-RESULTS_FILE = Path("Resultados/consolidated_results.csv")
-
-OUTPUT_DIR = Path("Resultados/plots")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True) # Cria a pasta de gráficos caso não exista
-COLUMN_MAP = {
-    "mae": ["mae", "mae_test", "MAE"],
-    "rmse": ["rmse", "rmse_test", "RMSE"],
-    "smape": ["smape", "smape_test", "SMAPE", "sMAPE"],
-    "model": ["model", "modelo"],
-    "category": ["category", "cat", "categoria"],
-    "product": ["product", "produto", "sku"]
-}
-
-def _mean(values):
-    return sum(values) / len(values) if values else float("nan")
-
-
-def find_column(df, metric):
-    for col in COLUMN_MAP[metric]:
-        if col in df.columns:
-            return col
-    raise ValueError(f" Nenhuma coluna válida encontrada para {metric}")
-
-def _find_column(headers: list[str], key: str) -> str:
-    for col in COLUMN_MAP[key]:
-        if col in headers:
-            return col
-    raise ValueError(f"Nenhuma coluna válida encontrada para '{key}'. Colunas: {headers}")
-
-
-def _to_float(value: str) -> float:
-    if value is None:
-        return float("nan")
-    value = str(value).strip().replace(",", ".")
-    if value == "":
-        return float("nan")
-    try:
-        return float(value)
-    except ValueError:
-        return float("nan")
-
-
-def load_results(results_file: Path) -> tuple[list[dict], dict[str, str]]:
-    if not results_file.exists():
-        raise FileNotFoundError(f"Arquivo de resultados não encontrado: {results_file}")
-
-    with results_file.open("r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        headers = reader.fieldnames or []
-        col = {
-            "model": _find_column(headers, "model"),
-            "mae": _find_column(headers, "mae"),
-            "rmse": _find_column(headers, "rmse"),
-            "smape": _find_column(headers, "smape"),
-        }
-        for optional in ["category", "product"]:
-            try:
-                col[optional] = _find_column(headers, optional)
-            except ValueError:
-                pass
-
-        rows = list(reader)
-
-    for row in rows:
-        row[col["mae"]] = _to_float(row.get(col["mae"], ""))
-        row[col["rmse"]] = _to_float(row.get(col["rmse"], ""))
-        row[col["smape"]] = _to_float(row.get(col["smape"], ""))
-
-    return rows, col
-
-
-def _save_current_figure(output_dir: Path, name: str, plt) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    plt.tight_layout()
-    plt.savefig(output_dir / f"{name}.png", dpi=300)
-    plt.savefig(output_dir / f"{name}.pdf")
-    plt.close()
-
-
-def _group_metric_mean(rows: list[dict], model_col: str, metric_col: str) -> list[tuple[str, float]]:
-    agg = defaultdict(list)
-    for r in rows:
-        val = r.get(metric_col)
-        if isinstance(val, float) and val == val:
-            agg[str(r.get(model_col, "desconhecido"))].append(val)
-    return sorted([(k, _mean(v)) for k, v in agg.items() if v], key=lambda x: x[1])
-
-
-def plot_metric_by_model(rows: list[dict], model_col: str, metric_col: str, metric_name: str, output_dir: Path, plt) -> None:
-    summary = _group_metric_mean(rows, model_col, metric_col)
-    if not summary:
-        return
-
-    labels = [x[0] for x in summary]
-    values = [x[1] for x in summary]
-
-    _, ax = plt.subplots(figsize=(9, 5))
-    bars = ax.bar(labels, values)
-    ax.set_title(f"Comparação de modelos por {metric_name.upper()} (média)")
-    ax.set_ylabel(metric_name.upper())
-    ax.set_xlabel("Modelo")
-
-    for bar, v in zip(bars, values):
-        ax.text(bar.get_x() + bar.get_width() / 2, v, f"{v:.2f}", ha="center", va="bottom", fontsize=9)
-
-    _save_current_figure(output_dir, f"models_{metric_name}", plt)
-
-
-def plot_smape_distribution(rows: list[dict], smape_col: str, output_dir: Path, plt) -> None:
-    data = [r[smape_col] for r in rows if isinstance(r.get(smape_col), float) and r[smape_col] == r[smape_col]]
-    if not data:
-        return
-    _, ax = plt.subplots(figsize=(9, 5))
-    ax.hist(data, bins=30, alpha=0.85)
-    ax.set_title("Distribuição do sMAPE")
-    ax.set_xlabel("sMAPE")
-    ax.set_ylabel("Frequência")
-    ax.axvline(200, color="red", linestyle="--", linewidth=2, label="Limite teórico 200")
-    ax.legend()
-    _save_current_figure(output_dir, "smape_distribution", plt)
-
-
-def plot_mae_vs_smape(rows: list[dict], mae_col: str, smape_col: str, output_dir: Path, plt) -> None:
-    mae = [r[mae_col] for r in rows if isinstance(r.get(mae_col), float) and r[mae_col] == r[mae_col]]
-    smape = [r[smape_col] for r in rows if isinstance(r.get(mae_col), float) and r.get(mae_col) == r.get(mae_col) and isinstance(r.get(smape_col), float) and r[smape_col] == r[smape_col]]
-    if not mae or not smape:
-        return
-
-    non_mae = [m for m, s in zip(mae, smape) if s < 199.999]
-    non_smape = [s for s in smape if s < 199.999]
-    sat_mae = [m for m, s in zip(mae, smape) if s >= 199.999]
-    sat_smape = [s for s in smape if s >= 199.999]
-
-    _, ax = plt.subplots(figsize=(8, 6))
-    ax.scatter(non_mae, non_smape, alpha=0.7, label="sMAPE < 200")
-    if sat_mae:
-        ax.scatter(sat_mae, sat_smape, color="red", alpha=0.8, label="sMAPE = 200")
-    ax.set_title("Relação entre MAE e sMAPE")
-    ax.set_xlabel("MAE")
-    ax.set_ylabel("sMAPE")
-    ax.legend()
-    _save_current_figure(output_dir, "mae_vs_smape", plt)
-
-
-def plot_smape_by_category(rows: list[dict], category_col: str, smape_col: str, output_dir: Path, plt) -> None:
-    grouped = defaultdict(list)
-    for r in rows:
-        c = str(r.get(category_col, "desconhecido"))
-        s = r.get(smape_col)
-        if isinstance(s, float) and s == s:
-            grouped[c].append(s)
-
-    if not grouped:
-        return
-
-    labels = list(grouped.keys())
-    series = [grouped[k] for k in labels]
-
-    _, ax = plt.subplots(figsize=(10, 5))
-    ax.boxplot(series, labels=labels)
-    ax.set_title("sMAPE por categoria")
-    ax.set_xlabel("Categoria")
-    ax.set_ylabel("sMAPE")
-    _save_current_figure(output_dir, "smape_by_category", plt)
-
-
-def _worst_rows(rows: list[dict], mae_col: str, k: int = 5) -> list[dict]:
-    valid = [r for r in rows if isinstance(r.get(mae_col), float) and r[mae_col] == r[mae_col]]
-    return sorted(valid, key=lambda r: r[mae_col], reverse=True)[:k]
-
-
-def print_technical_summary(rows: list[dict], col: dict[str, str], output_dir: Path) -> None:
-    smape_vals = [r[col["smape"]] for r in rows if isinstance(r.get(col["smape"]), float) and r[col["smape"]] == r[col["smape"]]]
-    mae_vals = [r[col["mae"]] for r in rows if isinstance(r.get(col["mae"]), float) and r[col["mae"]] == r[col["mae"]]]
-    rmse_vals = [r[col["rmse"]] for r in rows if isinstance(r.get(col["rmse"]), float) and r[col["rmse"]] == r[col["rmse"]]]
-
-    paired = [r for r in rows if all(isinstance(r.get(col[k]), float) and r[col[k]] == r[col[k]] for k in ["mae", "rmse", "smape"])]
-
-    smape_200_ratio = (sum(1 for r in paired if r[col["smape"]] >= 199.999) / len(paired) * 100) if paired else 0.0
-    rmse_mae_violations = sum(1 for r in paired if r[col["rmse"]] < r[col["mae"]])
-
-    lines = [
-        "===== RESUMO TÉCNICO =====",
-        f"Total de linhas avaliadas: {len(rows)}",
-        f"sMAPE médio: {_mean(smape_vals):.2f}" if smape_vals else "sMAPE médio: n/a",
-        f"MAE médio: {_mean(mae_vals):.2f}" if mae_vals else "MAE médio: n/a",
-        f"RMSE médio: {_mean(rmse_vals):.2f}" if rmse_vals else "RMSE médio: n/a",
-        f"% de linhas com sMAPE=200: {smape_200_ratio:.2f}%",
-        f"Violações da regra RMSE >= MAE: {rmse_mae_violations}",
-        "",
-        "Top 5 piores MAE:",
-    ]
-
-    display_cols = [c for c in [col.get("category"), col.get("product"), col["model"], col["mae"], col["rmse"], col["smape"]] if c]
-    for r in _worst_rows(rows, col["mae"], k=5):
-        lines.append(" | ".join(f"{c}={r.get(c)}" for c in display_cols))
-
-    lines.extend(["", "Recomendações automáticas:"])
-    if smape_200_ratio > 30:
-        lines.append("- Alta incidência de sMAPE=200: separar séries intermitentes e avaliar Croston/SBA/Tsb.")
-        lines.append("- Incluir métrica adicional robusta a zeros (MASE, WAPE) para banca e comparação.")
-    if rmse_mae_violations > 0:
-        lines.append("- Existem inconsistências matemáticas entre MAE e RMSE. Verifique o pipeline de métricas.")
-    else:
-        lines.append("- MAE e RMSE consistentes (RMSE >= MAE em todas as linhas).")
-
-    text = "\n".join(lines)
-    print(text)
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "technical_summary.txt").write_text(text, encoding="utf-8")
-
-
-# --- NOVA FUNÇÃO: Gera gráficos para todos os CSVs de resultados encontrados em 'Resultados/' ---
-def generate_plots_for_all_csvs(resultados_dir=Path("Resultados"), output_dir=Path("Resultados/plots")):
+def plot_quantidade_por_tempo(predictions, output_path: str = None, title_suffix: str = ""):
+    """
+    Plota série temporal Real vs Predito com métrica de erro no título.
+    Agrupa os dados por data (soma de todos os produtos do arquivo).
+    """
     plt = _get_plt()
     if plt is None:
-        print("matplotlib não instalado. Instale para gerar gráficos.")
         return
-    # Cria subpasta por data/hora de execução
-    now_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    session_dir = output_dir / now_str
-    session_dir.mkdir(parents=True, exist_ok=True)
-    for subdir, _, files in os.walk(resultados_dir):
-        if 'plots' in subdir:
-            continue
-        for file in files:
-            if file.endswith('.csv'):
-                csv_path = Path(subdir) / file
-                # Identifica o modelo pelo nome da subpasta (ex: 'lstm', 'gru', etc.)
-                parts = Path(subdir).parts
-                model_name = next((p for p in parts if p.lower() in ['lstm','gru','xgb','baseline_zero_aware']), 'outros')
-                model_dir = session_dir / model_name
-                model_dir.mkdir(parents=True, exist_ok=True)
-                try:
-                    df = pd.read_csv(csv_path)
-                except Exception as e:
-                    print(f"[!] Falha ao ler {csv_path}: {e}")
-                    continue
-                # Filtra apenas linhas da data/hora atual do arquivo, se desejar separar por data do resultado
-                # Exemplo: cria subpastas por data do timestamp da linha
-                if 'timestamp' in df.columns:
-                    df['date_only'] = pd.to_datetime(df['timestamp']).dt.date.astype(str)
-                    for date_str, group in df.groupby('date_only'):
-                        date_dir = model_dir / date_str
-                        date_dir.mkdir(parents=True, exist_ok=True)
-                        for metric in ['mae', 'rmse', 'smape']:
-                            metric_col = None
-                            for col in COLUMN_MAP[metric]:
-                                if col in group.columns:
-                                    metric_col = col
-                                    break
-                            if metric_col is None:
-                                continue
-                            plt.figure(figsize=(7,4))
-                            plt.title(f"{file} - {metric_col} - {date_str}")
-                            plt.hist(group[metric_col].dropna(), bins=20, color='skyblue', edgecolor='black')
-                            plt.xlabel(metric_col)
-                            plt.ylabel('Frequência')
-                            out_name = f"{file.replace('.csv','')}_{metric_col}"
-                            plt.tight_layout()
-                            plt.savefig(date_dir / f"{out_name}.png", dpi=300)
-                            plt.close()
-                            print(f"[+] Gráfico gerado: {date_dir / f'{out_name}.png'}")
-                    continue  # já processou por data, não faz o geral
-                else:
-                    for metric in ['mae', 'rmse', 'smape']:
-                        metric_col = None
-                        for col in COLUMN_MAP[metric]:
-                            if col in df.columns:
-                                metric_col = col
-                                break
-                        if metric_col is None:
-                            continue
-                        plt.figure(figsize=(7,4))
-                        plt.title(f"{file} - {metric_col}")
-                        plt.hist(df[metric_col].dropna(), bins=20, color='skyblue', edgecolor='black')
-                        plt.xlabel(metric_col)
-                        plt.ylabel('Frequência')
-                        out_name = f"{file.replace('.csv','')}_{metric_col}"
-                        plt.tight_layout()
-                        plt.savefig(model_dir / f"{out_name}.png", dpi=300)
-                        plt.close()
-                        print(f"[+] Gráfico gerado: {model_dir / f'{out_name}.png'}")
+
+    # Carregamento flexível dos dados
+    if isinstance(predictions, (str, Path)):
+        df = pd.read_csv(predictions)
+    else:
+        df = predictions.copy()
+
+    if 'date' not in df.columns or 'y_true' not in df.columns or 'y_pred' not in df.columns:
+        print(f"[ERRO] Colunas necessárias ausentes em {predictions}")
+        return
+
+    df['date'] = pd.to_datetime(df['date'])
+
+    # Cálculo do sMAPE global do arquivo para o título
+    y_t = df['y_true'].values
+    y_p = df['y_pred'].values
+    denom = (np.abs(y_t) + np.abs(y_p)) / 2.0
+    smape_val = 100 * np.mean(np.abs(y_t - y_p) / np.where(denom == 0, 1, denom))
+
+    # Agrupamento por data para visualização da tendência
+    agrupado = df.groupby('date').agg({'y_true': 'sum', 'y_pred': 'sum'}).reset_index()
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(agrupado['date'], agrupado['y_true'], label='Real', color='#2c3e50', linewidth=2)
+    plt.plot(agrupado['date'], agrupado['y_pred'], label='Predito', color='#e67e22', linestyle='--', linewidth=2)
+    
+    plt.title(f'Performance Global: {title_suffix}\n(sMAPE Médio: {smape_val:.2f}%)', fontsize=14)
+    plt.xlabel('Data')
+    plt.ylabel('Quantidade Total')
+    plt.legend()
+    plt.tight_layout()
+    
+    final_path = output_path or "quantidade_por_tempo.png"
+    plt.savefig(final_path, dpi=300)
+    plt.close()
+    print(f"[+] Gráfico salvo em: {final_path}")
+
+def gerar_graficos_todos_predictions():
+    """Varre a pasta Resultados e gera gráficos para todos os arquivos de predição encontrados."""
+    padrao = str(RESULTS_PATH / "**" / "*_predictions.csv")
+    arquivos = glob.glob(padrao, recursive=True)
+
+    if not arquivos:
+        print(f"[-] Nenhum arquivo *_predictions.csv encontrado em {RESULTS_PATH}")
+        return
+
+    for arq in arquivos:
+        nome_base = Path(arq).stem
+        out_path = OUTPUT_DIR / f"{nome_base}.png"
+        
+        # Extrai o nome do modelo/cenário do nome do arquivo para o título
+        label = nome_base.replace("_predictions", "").replace("_", " ").upper()
+        
+        try:
+            plot_quantidade_por_tempo(arq, output_path=str(out_path), title_suffix=label)
+        except Exception as e:
+            print(f"[ERRO] Falha ao processar {nome_base}: {e}")
 
 if __name__ == "__main__":
-    # Apenas a função automática de busca de CSVs e geração de gráficos
-    generate_plots_for_all_csvs()
+    print(f"[DEBUG] Iniciando geração de gráficos em: {OUTPUT_DIR}")
+    gerar_graficos_todos_predictions()

@@ -1,22 +1,26 @@
 import os
 import random
 import numpy as np
-import tensorflow as tf
+
+
+import os
+import random
+import numpy as np
 
 def set_global_seed(seed: int = 42):
     """
-    Garante reprodutibilidade total do pipeline.
+    Garante reprodutibilidade básica do pipeline.
+    A semente do TensorFlow deve ser fixada separadamente DENTRO dos scripts de Deep Learning.
     """
     # Fixa o hash do Python para garantir ordem consistente em dicionários e sets   
     os.environ["PYTHONHASHSEED"] = str(seed)
-    # Força o TensorFlow a usar algoritmos determinísticos 
+    # Força determinismo em operações matemáticas nativas
     os.environ["TF_DETERMINISTIC_OPS"] = "1"
 
-    # Fixa as sementes para Python nativo, Numpy e TensorFlow
+    # Fixa as sementes para Python nativo e Numpy (Leve e seguro)
     random.seed(seed)
     np.random.seed(seed)
-    tf.random.set_seed(seed)
-
+    
 from pathlib import Path
 import pandas as pd
 from datetime import datetime

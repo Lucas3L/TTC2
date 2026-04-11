@@ -443,5 +443,5 @@ Não há garantia matemática de manter exatamente a mesma qualidade ao reduzir 
    - Executar período completo e comparar métricas (`smape`, `mae`, `rmse`) com baseline da execução anterior.
 
 Regra prática:
-- Se a diferença de sMAPE ficar dentro de uma margem pequena (ex.: <= 1-2 p.p.) para o seu negócio, o ganho de tempo geralmente compensa.
+- Se a diferença de sMAPE ficar dentro de uma margem pequena (ex.: <= 1-2 p.p.) para o seu negócio, o gangit ho de tempo geralmente compensa.
 - Se houver degradação relevante, aumente gradualmente `epochs` ou árvores até encontrar o melhor compromisso.

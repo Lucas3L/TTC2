@@ -3,17 +3,20 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 def smape(y_true, y_pred):
     # Converte entradas para arrays e garante formato unidimensional para o cálculo
-    y_true = np.asarray(y_true).reshape(-1)
-    y_pred = np.asarray(y_pred).reshape(-1)
+    y_true = np.asarray(y_true, dtype=float).reshape(-1)
+    y_pred = np.asarray(y_pred, dtype=float).reshape(-1)
 
     # Cálculo da média das magnitudes para normalização simétrica do erro
     denominator = (np.abs(y_true) + np.abs(y_pred))
     
-    # Calcula a diferença absoluta ponderada pelo denominador simétrico
-    diff = 200 * np.abs(y_true - y_pred) / denominator
+    # Inicia o array de diferenças já com zeros (Isso já resolve o caso 0/0)
+    diff = np.zeros_like(y_true, dtype=float)
 
-    # Cláusula de guarda: define erro como zero onde real e previsto são zero
-    diff[denominator == 0] = 0.0
+    # Cria uma "máscara" que só é True onde o denominador não é zero
+    mask = denominator > 0
+
+    # Calcula a divisão APENAS onde a máscara é True
+    diff[mask] = 200 * np.abs(y_true[mask] - y_pred[mask]) / denominator[mask]
 
     # Retorna a média do erro percentual simétrico em escala de 0 a 100
     return np.mean(diff)
