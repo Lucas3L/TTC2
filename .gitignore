@@ -7,8 +7,10 @@ Dados/
 # Resultados gerados
 results/
 Resultados/
-Resultado1/
+GRUPO DE RESULTADOS/
+
 *.csv
+.venv310/
 
 # Python
 __pycache__/

@@ -16,8 +16,8 @@ DEFAULT_EXPERIMENT_CONFIG = {
         "XGBoost": SRC_DIR / "models" / "xgboost_model.py",
         "Baseline": SRC_DIR / "models" / "baseline_zero_aware.py",
     },
-    # Filtro temporal global opcional para todos os modelos.
-    # formato YYYY-MM-DD ou None para sem filtro.
     "date_from": None,
     "date_to": None,
+    # Tempo limite para cada modelo (7200s = 2 horas)
+    "model_timeout_sec": 7200 
 }

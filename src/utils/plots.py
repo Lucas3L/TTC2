@@ -14,7 +14,7 @@ OUTPUT_DIR = RESULTS_PATH / "plots"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 def _get_plt():
-    """Tenta importar matplotlib de forma segura para ambientes sem interface gráfica."""
+    """ importar matplotlib de forma segura para ambientes sem interface gráfica."""
     try:
         import matplotlib.pyplot as plt
         plt.style.use("seaborn-v0_8-whitegrid")

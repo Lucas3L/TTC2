@@ -42,10 +42,12 @@ except ImportError:
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-WINDOW = COMMON_MODEL_PARAMS["window_size"]    
-BATCH_SIZE = COMMON_MODEL_PARAMS["training_by_model"]["gru"]["batch_size"]
-EPOCHS = COMMON_MODEL_PARAMS["training_by_model"]["gru"]["epochs"]
-PATIENCE = COMMON_MODEL_PARAMS["training_by_model"]["gru"]["patience"]
+GRU_PARAMS = COMMON_MODEL_PARAMS["training_by_model"]["gru"]    
+BATCH_SIZE = GRU_PARAMS["batch_size"]
+EPOCHS = GRU_PARAMS["epochs"]
+PATIENCE = GRU_PARAMS.get("patience", None)
+
+WINDOW = COMMON_MODEL_PARAMS["window_size"]
 TRAIN_RATIO = COMMON_MODEL_PARAMS["train_ratio"]
 VAL_RATIO = COMMON_MODEL_PARAMS["val_ratio"]
 
@@ -54,7 +56,7 @@ LAGS = COMMON_MODEL_PARAMS["lags"]
 ROLLING_WINDOWS = COMMON_MODEL_PARAMS["rolling_windows"]
 QTY_FEATURES = [f"lag_{lag}" for lag in LAGS] + [f"rolling_mean_{w}" for w in ROLLING_WINDOWS]
 
-INPUT_BASE = ROOT / "Dados" / "preprocessed"
+INPUT_BASE = ROOT / "Dados" / "split"
 OUTPUT_BASE = ensure_dir(ROOT / "Resultados" / "gru")
 TARGET = 'quantity'
 
@@ -63,12 +65,12 @@ def build_gru_model(n_products, n_features, window):
     input_ts = Input(shape=(window, n_features))
     input_prod = Input(shape=(1,))
 
-    # Sem Masking! Os dados já chegam limpos pelo dropna absoluto.
+    # Não utiliza Masking; os dados já chegam limpos pelo dropna absoluto.
     x = GRU(64, return_sequences=True)(input_ts)
     x = Dropout(0.2)(x)
     x = GRU(32)(x)
 
-    # Embedding para a rede neural diferenciar produtos/clusters
+    # Realiza embedding para a rede neural diferenciar produtos/clusters
     emb = Embedding(input_dim=n_products, output_dim=16)(input_prod)
     emb = Flatten()(emb)
 
@@ -82,8 +84,7 @@ def build_gru_model(n_products, n_features, window):
 
 
 def run_gru(X_train, y_train, id_train, X_val, y_val, id_val, X_test, y_test, id_test):
-    # n_products precisa ser seguro contra IDs ausentes nos splits
-    n_products = int(max(id_train.max(), id_val.max(), id_test.max()) + 1)
+    n_products = int(max(id_train.max(), id_val.max() if len(id_val) > 0 else 0, id_test.max()) + 1)
     model = build_gru_model(n_products, X_train.shape[-1], WINDOW)
 
     def has_nan_inf(arr, name):
@@ -91,21 +92,27 @@ def run_gru(X_train, y_train, id_train, X_val, y_val, id_val, X_test, y_test, id
         if np.any(np.isinf(arr)): return True
         return False
 
-    if has_nan_inf(X_train, 'X_train') or has_nan_inf(y_train, 'y_train') or has_nan_inf(X_val, 'X_val') or has_nan_inf(y_val, 'y_val') or has_nan_inf(X_test, 'X_test'):
+    if has_nan_inf(X_train, 'X_train') or has_nan_inf(y_train, 'y_train') or has_nan_inf(X_test, 'X_test'):
         print(f"[ERRO][GRU] Dados inválidos detectados, abortando treino deste bloco.")
         return np.array([])
 
-    early_stop = EarlyStopping(monitor='val_loss', patience=PATIENCE, restore_best_weights=True)
+    callbacks_list = []
+    val_data = None
+    
+    if PATIENCE is not None and len(X_val) > 0:
+        early_stop = EarlyStopping(monitor='val_loss', patience=PATIENCE, restore_best_weights=True)
+        callbacks_list.append(early_stop)
+        val_data = ([X_val, id_val], y_val)
 
     try:
         print(f" -> [GRU GLOBAL] Iniciando treino | {len(X_train)} sequências válidas...")
         model.fit(
             [X_train, id_train], y_train,
-            validation_data=([X_val, id_val], y_val),
+            validation_data=val_data,
             epochs=EPOCHS,
             batch_size=BATCH_SIZE,
-            callbacks=[early_stop],
-            verbose=1 # Mostrar progresso no terminal
+            callbacks=callbacks_list,
+            verbose=1 
         )
         preds = model.predict([X_test, id_test], verbose=0).flatten()
     except Exception as e:
@@ -128,7 +135,7 @@ def create_sequences(data, features, target, window):
             p.append(prod_id)
             d.append(g["date"].iloc[i+window])
             
-    # Forçar Float32 para salvar memória RAM no Windows
+    # Força Float32 para economizar memória RAM no Windows
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32), np.array(p, dtype=np.int32), np.array(d)
 
 
@@ -153,7 +160,7 @@ def process_file(csv_file, scenario=None, date_from=None, date_to=None):
                [c for c in QTY_FEATURES if c in df.columns] + \
                [c for c in CYCLIC_FEATURES if c in df.columns]
 
-    # --- CONEXÃO DOS CENÁRIOS NA REDE NEURAL ---
+    # Realiza a conexão dos cenários na rede neural
     if scenario is not None:
         col_map = {"volume": "volume_cluster", "price": "price_cluster", "kmeans": "kmeans_cluster"}
         cluster_col = col_map.get(scenario)
@@ -161,7 +168,7 @@ def process_file(csv_file, scenario=None, date_from=None, date_to=None):
             df[cluster_col] = LabelEncoder().fit_transform(df[cluster_col].astype(str))
             if cluster_col not in features:
                 features.append(cluster_col)
-    # -------------------------------------------
+    # Fim da conexão dos cenários
 
     feat_cols = features + [TARGET]
     df = df.dropna(subset=feat_cols)
@@ -175,7 +182,7 @@ def process_file(csv_file, scenario=None, date_from=None, date_to=None):
     train_list, val_list, test_list = [], [], []
     for pid, g in df.groupby('product_id'):
         n = len(g)
-        if n < WINDOW * 2: continue # Ignora os picotados
+        if n < WINDOW * 2: continue # Ignora produtos com poucos dados
 
         train_end = int(n * TRAIN_RATIO)
         val_end = int(n * (TRAIN_RATIO + VAL_RATIO))
@@ -195,9 +202,13 @@ def process_file(csv_file, scenario=None, date_from=None, date_to=None):
 
     scaler_x = MinMaxScaler()
     train_df[features] = scaler_x.fit_transform(train_df[features])
-    val_df[features] = scaler_x.transform(val_df[features])
-    test_df[features] = scaler_x.transform(test_df[features])
-    
+
+    if not val_df.empty:
+        val_df[features] = scaler_x.transform(val_df[features])
+        
+    if not test_df.empty:
+        test_df[features] = scaler_x.transform(test_df[features])
+
     X_train, y_train, id_train, _ = create_sequences(train_df, features, TARGET, WINDOW)
     X_val, y_val, id_val, _ = create_sequences(val_df, features, TARGET, WINDOW)
     X_test, y_test, id_test, d_test = create_sequences(test_df, features, TARGET, WINDOW)
@@ -230,60 +241,95 @@ def process_file(csv_file, scenario=None, date_from=None, date_to=None):
 
 
 def main():
-    global EPOCHS
+    global EPOCHS # Apenas LSTM e GRU precisam dessa linha. No XGBoost pode apagar.
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--scenario", type=str, default=None)
-    parser.add_argument("--epochs", type=int, default=EPOCHS)
-    parser.add_argument("--date-from", type=str, default=None)
-    parser.add_argument("--date-to", type=str, default=None)
-    args = parser.parse_args()
+    parser.add_argument("--scenario", type=str, default=None,
+                        help="Cenário a ser aplicado (volume, price, kmeans)")
+    parser.add_argument("--epochs", type=int, default=EPOCHS, # Apenas LSTM e GRU precisam dessa linha. No XGB pode apagar.
+                        help="Número de épocas de treinamento")
+    parser.add_argument("--date-from", type=str, default=None,
+                        help="Data inicial (YYYY-MM-DD) para filtrar histórico")
+    parser.add_argument("--date-to", type=str, default=None,
+                        help="Data final (YYYY-MM-DD) para filtrar histórico")
 
+    args = parser.parse_args()
     import random
+    import numpy as np
     random.seed(args.seed)
     np.random.seed(args.seed)
+    
+    # Apenas LSTM e GRU precisam importar o tensorflow aqui na main. O XGBoost não precisa.
+    import tensorflow as tf
     tf.random.set_seed(args.seed)
 
+    # Sobrescrever EPOCHS se especificado (Apenas LSTM e GRU)
     EPOCHS = args.epochs
 
     for market_path in INPUT_BASE.iterdir():
-        if not market_path.is_dir(): continue
-        market_name = market_path.name
-        print(f"\nRodando GRU em: {market_name}")
+        if not market_path.is_dir():
+            continue
 
-        all_results, all_predictions = [], []
-        for csv_file in market_path.glob("cat*.csv"):
-            df_res, df_pred = process_file(csv_file, scenario=args.scenario, date_from=args.date_from, date_to=args.date_to)
-            if not df_res.empty: all_results.append(df_res)
-            if not df_pred.empty: all_predictions.append(df_pred)
+        market_name = market_path.name
+
+        # TROQUE "MODELO" pelo nome correto: LSTM, GRU ou XGBoost
+        print(f"\nRodando GRU em: {market_name}")
+        
+        # 1. Filtra para ler apenas os splits do cenário atual (Correção de Nomenclatura)
+        if args.scenario is not None:
+            # Se o cenário for "volume", ele busca por "vol" que é como o split salvou.
+            termo_busca = "vol" if args.scenario == "volume" else args.scenario
+            arquivos = list(market_path.glob(f"*_{termo_busca}.csv"))
+        else:
+            arquivos = list(market_path.glob('cat*.csv'))
+
+        if not arquivos:
+            print(f" [Aviso] Nenhum arquivo encontrado para o cenário {args.scenario} em {market_name}")
+            continue
+
+        all_results = []
+        all_predictions = []
+
+        for csv_file in arquivos:
+            # TROQUE process_file_lstm para process_file se estiver no GRU ou XGBoost
+            df_res, df_pred = process_file(
+                csv_file,scenario=args.scenario,
+                date_from=args.date_from, date_to=args.date_to
+            )
+
+            if not df_res.empty:
+                all_results.append(df_res)
+            if not df_pred.empty:
+                all_predictions.append(df_pred)
 
         if all_results:
             final = pd.concat(all_results, ignore_index=True)
+
+            # nome do arquivo inclui o cenário para evitar sobrescrita
             suffix = f"_{args.scenario}" if args.scenario else ""
-            out_file = OUTPUT_BASE / f"{market_name}_gru{suffix}.csv"
             
-            try:
-                ensure_dir(out_file.parent)
-                final.to_csv(out_file, index=False)
-                print(f"  Resultados salvos em {out_file}")
-            except Exception as e:
-                logging.error(f"[ERRO] Falha ao salvar {out_file}: {e}\n{traceback.format_exc()}")
+            # TROQUE "lstm" para "gru" ou "xgb"
+            out_file = OUTPUT_BASE / f"{market_name}_gru{suffix}.csv"
+            ensure_dir(out_file.parent)
+            final.to_csv(out_file, index=False)
+            print(f"  Resultados salvos em {out_file}")
 
             if all_predictions:
+                # TROQUE "lstm" para "gru" ou "xgb"
                 pred_file = OUTPUT_BASE / f"{market_name}_gru{suffix}_predictions.csv"
-                try:
-                    ensure_dir(pred_file.parent)
-                    pd.concat(all_predictions, ignore_index=True).to_csv(pred_file, index=False)
-                except Exception as e:
-                    pass
+                pd.concat(all_predictions, ignore_index=True).to_csv(pred_file, index=False)
+                print(f"  Curva real vs predito salva em {pred_file}")
 
-            mean_smap = final['smape'].mean()
-            print(f"FINAL sMAPE: {final['smape'].mean():.4f}")
-            print(f"MAE: {final['mae'].mean():.4f}")
-            print(f"RMSE: {final['rmse'].mean():.4f}")
+            # IMPRIME AS MÉTRICAS PARA O ORQUESTRADOR LER (Comunicação limpa)
+            for cat_file, group in final.groupby('arquivo'):
+                print(f"[{cat_file}] FINAL sMAPE: {group['smape'].mean():.4f}")
+                print(f"[{cat_file}] MAE: {group['mae'].mean():.4f}")
+                print(f"[{cat_file}] RMSE: {group['rmse'].mean():.4f}")
         else:
             market_smap = naive_market_smape(market_path)
-            print(f"FINAL sMAPE: {market_smap:.4f}")
+            print(f"[fallback_geral.csv] FINAL sMAPE: {market_smap:.4f}")
+            print(f"[fallback_geral.csv] MAE: 0.0000")
+            print(f"[fallback_geral.csv] RMSE: 0.0000")
 
 if __name__ == "__main__":
     main()

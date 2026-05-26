@@ -19,11 +19,7 @@ def apply_scenario(df, scenario):
 
 
 def group_by_volume(df, train_mask=None):
-    """
-    Agrupamento baseado no volume médio de vendas.
-    Divide os produtos em três grupos: baixo, médio e alto volume.
-    O cálculo dos bins é feito apenas no treino, se train_mask for fornecido.
-    """
+
     cfg = SCENARIO_PARAMS["volume"]
     if train_mask is not None:
         train_df = df[train_mask]
@@ -54,11 +50,7 @@ def group_by_volume(df, train_mask=None):
 
 
 def group_by_price(df, train_mask=None):
-    """
-    Agrupamento baseado no valor unitário do produto.
-    Divide os produtos em baratos, médios e caros.
-    O cálculo dos bins é feito apenas no treino, se train_mask for fornecido.
-    """
+
     cfg = SCENARIO_PARAMS["price"]
     if train_mask is not None:
         train_df = df[train_mask]
@@ -80,12 +72,7 @@ def group_by_price(df, train_mask=None):
 from sklearn.preprocessing import StandardScaler
 
 def group_by_kmeans(df, train_mask=None):
-    """
-    Agrupamento não supervisionado via K-Means usando
-    média de volume e preço por produto.
-    O fit do scaler e do KMeans é feito apenas no treino (se train_mask fornecido),
-    e o predict é aplicado a todos os produtos.
-    """
+
     cfg = SCENARIO_PARAMS["kmeans"]
     # Fit apenas no treino
     df_calc = df[train_mask] if train_mask is not None else df

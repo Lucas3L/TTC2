@@ -6,7 +6,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import os
-# --- VACINA PARA O BASELINE NÃO EXPLODIR A MEMÓRIA ---
+# --- Realiza a configuração para evitar estouro de memória no Baseline ---
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -24,7 +24,7 @@ import traceback
 import logging
 import argparse
 
-# --- IMPORTS CORRIGIDOS (Para resolver o aviso do Pylance) ---
+# --- Realiza imports corrigidos para evitar avisos do Pylance ---
 from src.utils.reproducibility import set_global_seed
 from src.utils.helpers import ensure_dir, normalize_columns, add_lag_features
 from src.utils.metrics import naive_market_smape
@@ -37,14 +37,14 @@ except ImportError:
     apply_scenario = None
 # -------------------------------------------------------------
 
-# Caminhos base usando raiz do projeto para evitar dependência de cwd
+# Caminhos base definidos usando a raiz do projeto para evitar dependência de cwd
 PROJECT_ROOT = ROOT
-INPUT_BASE = PROJECT_ROOT / "Dados" / "preprocessed"
+INPUT_BASE = PROJECT_ROOT / "Dados" / "split"
 
 OUTPUT_BASE = PROJECT_ROOT / "Resultados" / "baseline_zero_aware"
 ensure_dir(OUTPUT_BASE)
 
-# Setup error logging
+# Configuração do log de erros
 ERROR_LOG = PROJECT_ROOT / "Resultados" / "errors.log"
 logging.basicConfig(
     filename=ERROR_LOG,
@@ -57,7 +57,8 @@ TARGET = "quantity"
 
 WINDOW = COMMON_MODEL_PARAMS["window_size"]
 TRAIN_RATIO = COMMON_MODEL_PARAMS["train_ratio"]
-VAL_RATIO = COMMON_MODEL_PARAMS["val_ratio"]
+VAL_RATIO = COMMON_MODEL_PARAMS.get("val_ratio", 0.0)
+
 LAGS = COMMON_MODEL_PARAMS["lags"]
 ROLLING_WINDOWS = COMMON_MODEL_PARAMS["rolling_windows"]
 ROLLING_FEATURES = [f"rolling_mean_{w}" for w in ROLLING_WINDOWS]
@@ -74,11 +75,11 @@ def process_file(csv_file, scenario=None, date_from=None, date_to=None):
     if date_to is not None:
         df = df[df["date"] <= pd.to_datetime(date_to)]
         
-    # --- APLICAÇÃO DO CENÁRIO PARA JUSTIÇA COMPARATIVA ---
+    # Realiza a aplicação do cenário para justiça comparativa
     if scenario is not None and apply_scenario is not None:
         try: df = apply_scenario(df, scenario)
         except Exception: pass
-    # ----------------------------------------------------
+    # Fim da aplicação do cenário
 
     df = df.sort_values(["product_id", "date"])
     results = []
@@ -91,25 +92,25 @@ def process_file(csv_file, scenario=None, date_from=None, date_to=None):
             lag_cols = [f"lag_{lag}" for lag in LAGS]
             feat_cols = lag_cols + ROLLING_FEATURES + [TARGET]
 
-            # --- A MESMA LIMPEZA DOS OUTROS MODELOS ---
-            # Isso garante que o Baseline só preveja nos mesmos dias que o LSTM/XGBoost preveem
+            # Realiza a mesma limpeza dos outros modelos
+            # Garante-se que o Baseline só realize previsões nos mesmos dias que o LSTM/XGBoost
             g = g.dropna(subset=feat_cols)
             g = g[g[TARGET] != -99.0]
-            # ------------------------------------------
+            # Fim da limpeza
 
             n = len(g)
-            if n < WINDOW * 2: # Mesma trava de tamanho (Ignorar produtos curtos)
+            if n < WINDOW * 2: # Ignora produtos com poucos dados
                 continue
 
             train_end = int(n * TRAIN_RATIO)
             val_end = int(n * (TRAIN_RATIO + VAL_RATIO))
             test_df = g.iloc[val_end:].copy()
 
-            if len(test_df) < 5: # Mesma trava do XGBoost/GRU
+            if len(test_df) < 5: # Ignora produtos com poucos dados
                 continue
 
-            # A Previsão Naive: Amanhã = Hoje
-            # Como fizemos o dropna acima, não há mais NaNs ou -99.0 para mascarar
+            # Previsão Naive: Amanhã recebe o valor de Hoje
+            # Após o dropna acima, não restam mais NaNs ou -99.0 para mascarar
             y_pred = test_df['lag_1']
             y_true = test_df[TARGET]
 
@@ -147,7 +148,6 @@ def process_file(csv_file, scenario=None, date_from=None, date_to=None):
 
     return pd.DataFrame(results), pd.DataFrame(pred_rows)
 
-# Main
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=42)
@@ -171,9 +171,23 @@ def main():
         market_name = market_path.name
         print(f"\nRodando baseline_zero_aware em: {market_name}")
 
+        # 1. Filtra para ler apenas os splits do cenário atual (Correção de Nomenclatura)
+        if args.scenario is not None:
+            # Se o cenário for "volume", ele busca por "vol" que é como o split salvou.
+            termo_busca = "vol" if args.scenario == "volume" else args.scenario
+            arquivos = list(market_path.glob(f"*_{termo_busca}.csv"))
+        else:
+            arquivos = list(market_path.glob('cat*.csv'))
+            
+        if not arquivos:
+            print(f" [Aviso] Nenhum arquivo encontrado para o cenário {args.scenario} em {market_name}")
+            continue
+
         all_results = []
         all_predictions = []
-        for csv_file in market_path.glob("cat*.csv"):
+        
+        # 2. Processa os arquivos isolados
+        for csv_file in arquivos:
             df_res, df_pred = process_file(
                 csv_file, scenario=args.scenario,
                 date_from=args.date_from, date_to=args.date_to
@@ -183,6 +197,7 @@ def main():
             if not df_pred.empty:
                 all_predictions.append(df_pred)
 
+        # 3. Exporta e Imprime no formato do Orquestrador
         if all_results:
             final = pd.concat(all_results, ignore_index=True)
             suffix = f"_{args.scenario}" if args.scenario else ""
@@ -197,15 +212,16 @@ def main():
                 pd.concat(all_predictions, ignore_index=True).to_csv(pred_file, index=False)
                 print(f"  Curva real vs predito salva em {pred_file}")
             
-            mean_smape = final['smape'].mean()
-            print(f"FINAL sMAPE: {final['smape'].mean():.4f}")
-            print(f"MAE: {final['mae'].mean():.4f}")
-            print(f"RMSE: {final['rmse'].mean():.4f}")        
+            # IMPRESSÃO ISOLADA PARA O ORQUESTRADOR
+            for cat_file, group in final.groupby('arquivo'):
+                print(f"[{cat_file}] FINAL sMAPE: {group['smape'].mean():.4f}")
+                print(f"[{cat_file}] MAE: {group['mae'].mean():.4f}")
+                print(f"[{cat_file}] RMSE: {group['rmse'].mean():.4f}")
         else:
             market_smap = naive_market_smape(market_path)
-            print(f"FALLBACK market sMAPE: {market_smap:.4f}")
-            print(f"FINAL sMAPE: {market_smap:.4f}")
+            print(f"[fallback_geral.csv] FINAL sMAPE: {market_smap:.4f}")
+            print(f"[fallback_geral.csv] MAE: 0.0000")
+            print(f"[fallback_geral.csv] RMSE: 0.0000")
 
-# PONTO DE ENTRADA
 if __name__ == "__main__":
     main()

@@ -1,5 +1,5 @@
 ﻿import os
-# --- VACINA CONTRA O SEGFAULT DO WINDOWS ---
+# --- Realiza a configuração para evitar SEGFAULT no Windows ---
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE" 
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -45,9 +45,9 @@ CYCLIC_FEATURES = ["day_sin", "day_cos", "month_sin", "month_cos"]
 
 WINDOW = COMMON_MODEL_PARAMS["window_size"]
 TRAIN_RATIO = COMMON_MODEL_PARAMS["train_ratio"]
-VAL_RATIO = COMMON_MODEL_PARAMS["val_ratio"]
+VAL_RATIO = COMMON_MODEL_PARAMS.get("val_ratio", 0.0)
 
-INPUT_BASE = ROOT / "Dados" / "preprocessed"
+INPUT_BASE = ROOT / "Dados" / "split"
 OUTPUT_BASE = ensure_dir(ROOT / "Resultados" / "xgb")
 
 def compute_market_max(market_path):
@@ -104,7 +104,7 @@ def process_file(csv_file, market_max, scenario=None, date_from=None, date_to=No
 
     train_list, val_list, test_list = [], [], []
     
-    # 1. Separar o tempo de cada produto (mas ainda não treinar!)
+    # 1. Realiza a separação do tempo de cada produto (sem treinar neste momento)
     for pid_encoded, g in df.groupby('product_id_encoded'):
         g = g.copy()
         g[TARGET] = g[TARGET].clip(lower=0) / market_max
@@ -124,7 +124,7 @@ def process_file(csv_file, market_max, scenario=None, date_from=None, date_to=No
 
     if not train_list or not test_list: return pd.DataFrame(), pd.DataFrame()
 
-    # 2. Juntar tudo numa matriz Global
+    # 2. Realiza a junção em uma matriz Global
     train_df = pd.concat(train_list, ignore_index=True)
     val_df = pd.concat(val_list, ignore_index=True)
     test_df = pd.concat(test_list, ignore_index=True)
@@ -138,7 +138,7 @@ def process_file(csv_file, market_max, scenario=None, date_from=None, date_to=No
 
     if X_train.shape[0] == 0: return pd.DataFrame(), pd.DataFrame()
 
-    # 3. Treinar 1 Único XGBoost para a Loja
+    # 3. Treina um único XGBoost para a loja
     print(f" -> [XGBoost GLOBAL] Iniciando treino | {len(X_train)} registros...")
     sample_weight = np.where(train_y > 0, 3.0, 1.0)
     xgb_cfg = COMMON_MODEL_PARAMS["training_by_model"]["xgboost"]
@@ -153,23 +153,26 @@ def process_file(csv_file, market_max, scenario=None, date_from=None, date_to=No
         verbosity=0
     )
 
+    # --- PROTEÇÃO DO EVAL_SET PARA XGBOOST ---
+    eval_set = [(X_val, val_y)] if len(X_val) > 0 else None
+
     try:
         model.fit(
             X_train, train_y, sample_weight=sample_weight,
-            eval_set=[(X_val, val_y)], verbose=False
+            eval_set=eval_set, verbose=False
         )
         preds = model.predict(X_test).flatten()
     except Exception as e:
         print(f"[ERRO] Falha no XGBoost: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
-    # 4. Descomprimir Escala e Avaliar
+    # 4. Descomprime a escala e avalia
     preds_real = np.clip(preds, 0, None) * market_max
     y_true_real = test_y * market_max
 
     metrics = evaluate(y_true_real, preds_real)
     
-    # Criar DataFrames de Resultados
+    # Cria DataFrames de resultados
     metrics_df = pd.DataFrame([{
         "model": "xgboost", "arquivo": csv_file.name,
         "mae": metrics["MAE"], "rmse": metrics["RMSE"], "smape": metrics["sMAPE"]
@@ -188,47 +191,76 @@ def process_file(csv_file, market_max, scenario=None, date_from=None, date_to=No
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--scenario", type=str, default=None)
-    parser.add_argument("--date-from", type=str, default=None)
-    parser.add_argument("--date-to", type=str, default=None)
-    args = parser.parse_args()
+    parser.add_argument("--scenario", type=str, default=None,
+                        help="Cenário a ser aplicado (volume, price, kmeans)")
+    parser.add_argument("--date-from", type=str, default=None,
+                        help="Data inicial (YYYY-MM-DD) para filtrar histórico")
+    parser.add_argument("--date-to", type=str, default=None,
+                        help="Data final (YYYY-MM-DD) para filtrar histórico")
 
+    args = parser.parse_args()
+    import random
+    import numpy as np
     random.seed(args.seed)
     np.random.seed(args.seed)
 
     for market_path in INPUT_BASE.iterdir():
-        if not market_path.is_dir(): continue
-        arquivos = list(market_path.glob('cat*.csv'))
-        if not arquivos: continue
+        if not market_path.is_dir():
+            continue
 
         market_name = market_path.name
         market_max = compute_market_max(market_path)
+
         print(f"\nRodando XGBoost em: {market_name} | max_global_quantity={market_max:.4f}")
 
-        all_results, all_predictions = [], []
+       # 1. Filtra para ler apenas os splits do cenário atual (Correção de Nomenclatura)
+        if args.scenario is not None:
+            # Se o cenário for "volume", ele busca por "vol" que é como o split salvou.
+            termo_busca = "vol" if args.scenario == "volume" else args.scenario
+            arquivos = list(market_path.glob(f"*_{termo_busca}.csv"))
+        else:
+            arquivos = list(market_path.glob('cat*.csv'))
+            
+        if not arquivos:
+            print(f" [Aviso] Nenhum arquivo encontrado para o cenário {args.scenario} em {market_name}")
+            continue
+
+        all_results = []
+        all_predictions = []
 
         for csv_file in arquivos:
-            df_res, df_pred = process_file(csv_file, market_max=market_max, scenario=args.scenario, date_from=args.date_from, date_to=args.date_to)
-            if not df_res.empty: all_results.append(df_res)
-            if not df_pred.empty: all_predictions.append(df_pred)
+            df_res, df_pred = process_file(
+                csv_file, market_max=market_max, scenario=args.scenario,
+                date_from=args.date_from, date_to=args.date_to
+            )
+
+            if not df_res.empty:
+                all_results.append(df_res)
+            if not df_pred.empty:
+                all_predictions.append(df_pred)
 
         if all_results:
             final = pd.concat(all_results, ignore_index=True)
             suffix = f"_{args.scenario}" if args.scenario else ""
+            
             out_file = OUTPUT_BASE / f"{market_name}_xgb{suffix}.csv"
             ensure_dir(out_file.parent)
             final.to_csv(out_file, index=False)
-            
+
             if all_predictions:
                 pred_file = OUTPUT_BASE / f"{market_name}_xgb{suffix}_predictions.csv"
                 pd.concat(all_predictions, ignore_index=True).to_csv(pred_file, index=False)
 
-            print(f"FINAL sMAPE: {final['smape'].mean():.4f}")
-            print(f"MAE: {final['mae'].mean():.4f}")
-            print(f"RMSE: {final['rmse'].mean():.4f}")
+            # Imprime as métricas para o orquestrador ler
+            for cat_file, group in final.groupby('arquivo'):
+                print(f"[{cat_file}] FINAL sMAPE: {group['smape'].mean():.4f}")
+                print(f"[{cat_file}] MAE: {group['mae'].mean():.4f}")
+                print(f"[{cat_file}] RMSE: {group['rmse'].mean():.4f}")
         else:
             market_smap = naive_market_smape(market_path)
-            print(f"FINAL sMAPE: {market_smap:.4f}")
+            print(f"[fallback_geral.csv] FINAL sMAPE: {market_smap:.4f}")
+            print(f"[fallback_geral.csv] MAE: 0.0000")
+            print(f"[fallback_geral.csv] RMSE: 0.0000")
 
 if __name__ == "__main__":
     main()

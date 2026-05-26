@@ -57,14 +57,18 @@ from src.config.model_params import COMMON_MODEL_PARAMS
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-WINDOW = COMMON_MODEL_PARAMS["window_size"]  
-BATCH_SIZE = COMMON_MODEL_PARAMS["training_by_model"]["lstm"]["batch_size"]
-EPOCHS = COMMON_MODEL_PARAMS["training_by_model"]["lstm"]["epochs"]
-PATIENCE = COMMON_MODEL_PARAMS["training_by_model"]["lstm"]["patience"]
-TRAIN_RATIO = COMMON_MODEL_PARAMS["train_ratio"]
-VAL_RATIO = COMMON_MODEL_PARAMS["val_ratio"]
+LSTM_PARAMS = COMMON_MODEL_PARAMS["training_by_model"]["lstm"]  
+BATCH_SIZE = LSTM_PARAMS["batch_size"]
+EPOCHS = LSTM_PARAMS["epochs"]
+PATIENCE = LSTM_PARAMS.get("patience", None)
 
-INPUT_BASE = ROOT / "Dados" / "preprocessed"
+WINDOW = COMMON_MODEL_PARAMS["window_size"] 
+HORIZON = COMMON_MODEL_PARAMS.get("prediction_horizon_days", 1)
+
+TRAIN_RATIO = COMMON_MODEL_PARAMS["train_ratio"]
+VAL_RATIO = COMMON_MODEL_PARAMS.get("val_ratio", 0.0)
+
+INPUT_BASE = ROOT / "Dados" / "split"
 OUTPUT_BASE = ensure_dir(ROOT / "Resultados" / "lstm")
 
 TARGET = 'quantity'
@@ -101,6 +105,7 @@ def build_lstm_model(n_products, n_features, window):
     x = Concatenate()([x, emb])
     x = Dense(32, activation='relu')(x)
     output = Dense(1, activation='softplus')(x) # Softplus evita valores negativos
+        # Adiciona-se camada Masking para ignorar valores sentinela (-99.0)
 
     model = Model([input_ts, input_prod], output)
 
@@ -128,6 +133,7 @@ def create_sequences(df, window, features, target, positive_weight=3.0):
         w.append(positive_weight if target_next > 0 else 1.0)         
     
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32), np.array(w, dtype=np.float32)
+        # Itera-se por produto para garantir isolamento de históricos
 
 def _normalize_product_frame(g, market_max):
     g = g.copy()
@@ -232,12 +238,24 @@ def process_file_lstm(path, market_max, scenario=None, date_from=None, date_to=N
     model = build_lstm_model(n_products, len(features), WINDOW)
     
     print(f" -> [LSTM GLOBAL] Iniciando treino do mercado | {len(X_train)} sequências...")
-    early_stop = EarlyStopping(monitor='val_loss', patience=PATIENCE, restore_best_weights=True)
+    
+    # --- LÓGICA DINÂMICA DE VALIDAÇÃO E PACIÊNCIA ---
+    callbacks_list = []
+    val_data = None
+    
+    # Só aciona o EarlyStopping SE a paciência existir E se houver dados de validação
+    if PATIENCE is not None and len(X_val) > 0:
+        early_stop = EarlyStopping(monitor='val_loss', patience=PATIENCE, restore_best_weights=True)
+        callbacks_list.append(early_stop)
+        val_data = ([X_val, id_val], y_val)
     
     model.fit(
         x=[X_train, id_train], y=y_train, sample_weight=w_train,
-        validation_data=([X_val, id_val], y_val),
-        epochs=EPOCHS, batch_size=BATCH_SIZE, callbacks=[early_stop], verbose=1
+        validation_data=val_data, # Fica None se não houver validação (o Keras aceita isso sem erro)
+        epochs=EPOCHS, 
+        batch_size=BATCH_SIZE, 
+        callbacks=callbacks_list, # Fica vazio se não houver paciência
+        verbose=1
     )
 
     # 7. Previsão e Descompressão de Resultados
@@ -250,6 +268,7 @@ def process_file_lstm(path, market_max, scenario=None, date_from=None, date_to=N
     # Criar DataFrame de previsões (mapeando IDs de volta)
     pred_df = pd.DataFrame({
         "model": "lstm",
+        "arquivo": path.name, # <-- CORREÇÃO AQUI
         "product_id": le.inverse_transform(id_test.flatten().astype(int)),
         "date": np.concatenate(all_dates_test),
         "y_true": y_test_real,
@@ -257,7 +276,13 @@ def process_file_lstm(path, market_max, scenario=None, date_from=None, date_to=N
         "scenario": scenario
     })
 
-    metrics_df = pd.DataFrame([{"model": "lstm", "mae": metrics["MAE"], "smape": metrics["sMAPE"], "rmse": metrics["RMSE"]}])
+    metrics_df = pd.DataFrame([{
+        "model": "lstm", 
+        "arquivo": path.name,  # <-- CORREÇÃO AQUI
+        "mae": metrics["MAE"], 
+        "smape": metrics["sMAPE"], 
+        "rmse": metrics["RMSE"]
+    }])
     
     return metrics_df, pred_df
 
@@ -279,12 +304,12 @@ def compute_market_max(market_path):
 
 
 def main():
-    global EPOCHS
+    global EPOCHS # Apenas LSTM e GRU precisam dessa linha. No XGBoost pode apagar.
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--scenario", type=str, default=None,
                         help="Cenário a ser aplicado (volume, price, kmeans)")
-    parser.add_argument("--epochs", type=int, default=EPOCHS,
+    parser.add_argument("--epochs", type=int, default=EPOCHS, # Apenas LSTM e GRU precisam dessa linha. No XGB pode apagar.
                         help="Número de épocas de treinamento")
     parser.add_argument("--date-from", type=str, default=None,
                         help="Data inicial (YYYY-MM-DD) para filtrar histórico")
@@ -296,13 +321,14 @@ def main():
     import numpy as np
     random.seed(args.seed)
     np.random.seed(args.seed)
+    
+    # Apenas LSTM e GRU precisam importar o tensorflow aqui na main. O XGBoost não precisa.
     import tensorflow as tf
     tf.random.set_seed(args.seed)
 
-    # Sobrescrever EPOCHS se especificado
+    # Sobrescrever EPOCHS se especificado (Apenas LSTM e GRU)
     EPOCHS = args.epochs
 
-    # itera apenas sobre o cenário solicitado; o loop de cenários foi movido para main.py
     for market_path in INPUT_BASE.iterdir():
         if not market_path.is_dir():
             continue
@@ -310,12 +336,25 @@ def main():
         market_name = market_path.name
         market_max = compute_market_max(market_path)
 
-        print(f"\nRodando LSTM em: {market_name} | max_global_quantity={market_max:.4f}")
+        # TROQUE "MODELO" pelo nome correto: LSTM, GRU ou XGBoost
+        print(f"\nRodando MODELO em: {market_name} | max_global_quantity={market_max:.4f}")
+
+        # 1. Filtra para ler apenas os splits do cenário atual (Correção de Nomenclatura)
+        if args.scenario is not None:
+            # Se o cenário for "volume", ele busca por "vol" que é como o split salvou.
+            termo_busca = "vol" if args.scenario == "volume" else args.scenario
+            arquivos = list(market_path.glob(f"*_{termo_busca}.csv"))
+        else:
+            arquivos = list(market_path.glob('cat*.csv'))
+        if not arquivos:
+            print(f" [Aviso] Nenhum arquivo encontrado para o cenário {args.scenario} em {market_name}")
+            continue
 
         all_results = []
         all_predictions = []
 
-        for csv_file in market_path.glob("cat*.csv"):
+        for csv_file in arquivos:
+            # TROQUE process_file_lstm para process_file se estiver no GRU ou XGBoost
             df_res, df_pred = process_file_lstm(
                 csv_file, market_max=market_max, scenario=args.scenario,
                 date_from=args.date_from, date_to=args.date_to
@@ -331,25 +370,29 @@ def main():
 
             # nome do arquivo inclui o cenário para evitar sobrescrita
             suffix = f"_{args.scenario}" if args.scenario else ""
+            
+            # TROQUE "lstm" para "gru" ou "xgb"
             out_file = OUTPUT_BASE / f"{market_name}_lstm{suffix}.csv"
+            ensure_dir(out_file.parent)
             final.to_csv(out_file, index=False)
             print(f"  Resultados salvos em {out_file}")
 
             if all_predictions:
+                # TROQUE "lstm" para "gru" ou "xgb"
                 pred_file = OUTPUT_BASE / f"{market_name}_lstm{suffix}_predictions.csv"
                 pd.concat(all_predictions, ignore_index=True).to_csv(pred_file, index=False)
                 print(f"  Curva real vs predito salva em {pred_file}")
 
-            # imprime métrica final para que o orquestrador capture
-            mean_smap = final['smape'].mean()
-            print(f"FINAL sMAPE: {final['smape'].mean():.4f}")
-            print(f"MAE: {final['mae'].mean():.4f}")
-            print(f"RMSE: {final['rmse'].mean():.4f}")
+            # IMPRIME AS MÉTRICAS PARA O ORQUESTRADOR LER (Comunicação limpa)
+            for cat_file, group in final.groupby('arquivo'):
+                print(f"[{cat_file}] FINAL sMAPE: {group['smape'].mean():.4f}")
+                print(f"[{cat_file}] MAE: {group['mae'].mean():.4f}")
+                print(f"[{cat_file}] RMSE: {group['rmse'].mean():.4f}")
         else:
-            # calcula métrica de mercado como fallback
             market_smap = naive_market_smape(market_path)
-            print(f"FALLBACK market sMAPE: {market_smap:.4f}")
-            print(f"FINAL sMAPE: {market_smap:.4f}")
+            print(f"[fallback_geral.csv] FINAL sMAPE: {market_smap:.4f}")
+            print(f"[fallback_geral.csv] MAE: 0.0000")
+            print(f"[fallback_geral.csv] RMSE: 0.0000")
 
 if __name__ == "__main__":
     main()

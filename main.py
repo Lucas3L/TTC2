@@ -1,3 +1,4 @@
+import json
 import sys
 import subprocess
 import time
@@ -38,41 +39,22 @@ def _validate_date_str(date_str: str, field_name: str):
         ) from exc
 
 def extract_metrics(output: str):
-    """
-    Extração universal via Regex. 
-    Busca TODAS as ocorrências de métricas (útil se houver múltiplos markets)
-    e retorna a média aritmética delas.
-    """
-    metrics = {}
-    float_re = r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?|nan|NaN)"
-    patterns = {
-        "smape": rf"FINAL sMAPE:\s*{float_re}",
-        "mae": rf"MAE:\s*{float_re}",
-        "rmse": rf"RMSE:\s*{float_re}"
-    }
+    metrics_by_cat = {}
+    matches = re.findall(r"\[(.*?)\]\s*(FINAL sMAPE|MAE|RMSE):\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?|nan|NaN)", output)
     
-    for key, pattern in patterns.items():
-        matches = re.findall(pattern, output)
-        if not matches:
-            metrics[key] = None
-            continue
-
-        valid_vals = []
-        for val_str in matches:
-            try:
-                val = float(val_str)
-                if not math.isnan(val):
-                    valid_vals.append(val)
-            except Exception:
-                pass
-        
-        # Se achou valores válidos, calcula a média de todos os mercados impressos
-        if valid_vals:
-            metrics[key] = sum(valid_vals) / len(valid_vals)
-        else:
-            metrics[key] = None
+    for cat, metric_name, val_str in matches:
+        if cat not in metrics_by_cat:
+            metrics_by_cat[cat] = {"smape": None, "mae": None, "rmse": None}
+        try:
+            val = float(val_str)
+            if not math.isnan(val):
+                if metric_name == "FINAL sMAPE": metrics_by_cat[cat]["smape"] = val
+                elif metric_name == "MAE": metrics_by_cat[cat]["mae"] = val
+                elif metric_name == "RMSE": metrics_by_cat[cat]["rmse"] = val
+        except ValueError:
+            pass
             
-    return metrics
+    return metrics_by_cat
 
 def run_model(
     model_name,
@@ -154,26 +136,44 @@ def run_model(
 
     return results, runtime, status
 
-def log_result(model_name, replica_id, seed, metrics, runtime, status, scenario):
+def log_result(model_name, replica_id, seed, category, metrics, runtime, status, scenario):
     scenario_file = OUTPUT_DIR / f"{scenario}_results.csv"
     file_exists = scenario_file.exists()
 
     with open(scenario_file, mode="a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow(["timestamp", "model", "replica", "seed", "smape", "mae", "rmse", "runtime_sec", "status"])
+            writer.writerow(["timestamp", "model", "category", "replica", "seed", "smape", "mae", "rmse", "runtime_sec", "status"])
         
         writer.writerow([
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            model_name,
-            replica_id,
-            seed,
-            metrics.get("smape"),
-            metrics.get("mae"),
-            metrics.get("rmse"),
-            round(runtime, 3),
-            status
+            model_name, category, replica_id, seed,
+            metrics.get("smape"), metrics.get("mae"), metrics.get("rmse"),
+            round(runtime, 3), status
         ])
+
+def save_experiment_metadata(args):
+
+    metadata = {
+        "execution_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "orchestrator_args": {
+            "base_seed": args.seed,
+            "date_from": args.date_from,
+            "date_to": args.date_to,
+            "timeout_sec": args.model_timeout_sec,
+            "max_retries": args.max_retries
+        },
+        "experiment_config": DEFAULT_EXPERIMENT_CONFIG
+    }
+    
+    # Nome do arquivo com a data e hora para não sobrescrever execuções antigas
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    config_file = OUTPUT_DIR / f"config_run_{timestamp_str}.json"
+    
+    with open(config_file, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=4, ensure_ascii=False, default=str)
+
+    print(f" [+] Metadados do experimento salvos em: {config_file.name}")
 
 def main():
     parser = argparse.ArgumentParser()
@@ -183,7 +183,7 @@ def main():
     parser.add_argument(
         "--model-timeout-sec",
         type=int,
-        default=3600,
+        default=DEFAULT_EXPERIMENT_CONFIG.get("model_timeout_sec", 7200),        
         help="Timeout por execução de modelo em segundos.",
     )
     parser.add_argument(
@@ -202,7 +202,7 @@ def main():
         )
 
     set_global_seed(args.seed)
-
+    save_experiment_metadata(args)
     print(f"\n================ INICIANDO EXPERIMENTOS ({datetime.now().year}) ================")
     
     for replica_id in range(1, N_REPLICAS + 1):
@@ -222,11 +222,12 @@ def main():
                 )
 
                 # 4. Gestão de falhas: Se o script falhar, logamos mas o main continua
-                if metrics is not None:
-                    log_result(
-                        model_name, replica_id, current_seed, 
-                        metrics, runtime, status, scenario
-                    )
+                if metrics:
+                    for category, cat_metrics in metrics.items():
+                        log_result(
+                            model_name, replica_id, current_seed, category, 
+                            cat_metrics, runtime, status, scenario
+                        )
 
     print(f"\n================ EXPERIMENTOS FINALIZADOS ================")
     print(f"Logs de erro (se houver): {ERROR_LOG}")

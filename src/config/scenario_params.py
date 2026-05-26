@@ -4,10 +4,10 @@ SCENARIO_PARAMS = {
         "q": 3,
         "labels": ["low", "medium", "high"],
         "source_column": "quantity",
-    },
+    }, 
     "price": {
         "q": 3,
-        "labels": ["cheap", "mid", "expensive"],
+          "labels": ["cheap", "mid", "expensive"],
         "source_column": "unitvalue",
     },
     "kmeans": {
@@ -16,5 +16,5 @@ SCENARIO_PARAMS = {
         "n_init": "auto",
         "groupby_key": "product_id",
         "feature_columns": ["quantity", "unitvalue"],
-    },
+    }, 
 }
